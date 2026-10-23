@@ -1,0 +1,23 @@
+module.exports = {
+  discord: { guildId: "PASTE_GUILD_ID" },
+  channels: { generalChatId: "PASTE_CHANNEL_ID" },
+  currency: { name: "SterCoin", plural: "SterCoins", emoji: "🪙", thousandsSeparator: "," },
+  commands: { prefix: "." },
+  economy: { startingBalance: 0 },
+  activity: { enabled: true, cooldownSeconds: 300, amountMin: 1, amountMax: 3, ignoredChannelIds: [] },
+  daily: { enabled: true, amountMin: 20, amountMax: 50, cooldownHours: 24 },
+  drops: {
+    enabled: true,
+    intervalMinMinutes: 3,
+    intervalMaxMinutes: 25,
+    claimWindowMinutes: 10,
+    table: [ { weight: 70, min: 5, max: 15 }, { weight: 25, min: 16, max: 40 }, { weight: 5, min: 41, max: 100 } ],
+    embedTitle: "A SterCoin drop appeared!",
+    embedDescription: "First to claim it gets the SterCoins.",
+    claimButtonLabel: "Claim",
+    expiredText: "This drop expired.",
+  },
+  gift: { enabled: true, minAmount: 1, maxAmount: null, allowSelf: false, allowBots: false },
+  leaderboard: { size: 10 },
+  storage: { path: "data/data.json", flushIntervalMs: 3000, backupsEnabled: true, backupIntervalMinutes: 60, backupsToKeep: 24 },
+};
