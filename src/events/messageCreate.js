@@ -17,7 +17,7 @@ module.exports = {
       const parts = body.split(/\s+/);
       const name = parts[0].toLowerCase();
       const args = parts.slice(1);
-      const cmd = commands.find(c => c.name === name);
+      const cmd = commands.find(c => c.name === name || (Array.isArray(c.aliases) && c.aliases.includes(name)));
       if (!cmd) return;
       await cmd.executePrefix(message, args);
     } catch (e) {
