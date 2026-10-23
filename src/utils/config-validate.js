@@ -1,4 +1,4 @@
-const config = require("../config");
+const config = require("../../config");
 function isNumStr(v){ return typeof v === "string" && /^\d+$/.test(v); }
 function validate(cfg) {
   const errors = [];
