@@ -1,4 +1,5 @@
 const { MessageFlags } = require("discord.js");
+const config = require("../../config");
 const commands = require("../commands");
 
 module.exports = {
@@ -7,6 +8,20 @@ module.exports = {
   async execute(interaction) {
     try {
       if (!interaction.isChatInputCommand()) return;
+
+      const channelId = interaction.channelId;
+      if (!channelId) return;
+
+      const allowedChannelIds = config.commands.allowedChannelIds || [];
+      if (
+        allowedChannelIds.length > 0 &&
+        !allowedChannelIds.includes(channelId)
+      ) {
+        return interaction.reply({
+          content: "Commands are not allowed in this channel.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
 
       const cmd = commands.find(
         (command) => command.name === interaction.commandName

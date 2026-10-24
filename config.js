@@ -2,7 +2,7 @@ module.exports = {
   discord: { guildId: "1563216575652433993" },
   channels: { generalChatId: "1563216576378052620" },
   currency: { name: "SterCoin", plural: "SterCoins", emoji: "🪙", thousandsSeparator: "," },
-  commands: { prefix: "." },
+  commands: { prefix: ".", allowedChannelIds: ["1563239663995723897"] },
   economy: { startingBalance: 0 },
   activity: { enabled: true, cooldownSeconds: 300, amountMin: 1, amountMax: 3, ignoredChannelIds: [] },
   daily: { enabled: true, amountMin: 20, amountMax: 50, cooldownHours: 24 },

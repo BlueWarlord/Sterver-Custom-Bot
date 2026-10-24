@@ -45,6 +45,17 @@ module.exports = {
         return;
       }
 
+      const channelId = message.channel?.id;
+      if (!channelId) return;
+
+      const allowedChannelIds = config.commands.allowedChannelIds || [];
+      if (
+        allowedChannelIds.length > 0 &&
+        !allowedChannelIds.includes(channelId)
+      ) {
+        return;
+      }
+
       // Preserve the existing prefix commands and aliases.
       const cmd = commands.find(
         (command) =>

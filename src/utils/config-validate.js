@@ -71,7 +71,16 @@ function validate(cfg) {
     e("commands.prefix");
   }
 
-  // Economy configuration
+  if (
+    cfg.commands.allowedChannelIds !== undefined &&
+    (
+      !Array.isArray(cfg.commands.allowedChannelIds) ||
+      !cfg.commands.allowedChannelIds.every(isNumStr)
+    )
+  ) {
+    e("commands.allowedChannelIds");
+  }
+
   if (
     !Number.isInteger(cfg.economy.startingBalance) ||
     cfg.economy.startingBalance < 0
