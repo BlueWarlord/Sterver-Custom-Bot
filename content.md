@@ -8,16 +8,27 @@ module.exports = {
   activity: { enabled: true, cooldownSeconds: 300, amountMin: 1, amountMax: 3, ignoredChannelIds: [] },
   daily: { enabled: true, amountMin: 20, amountMax: 50, cooldownHours: 24 },
   drops: {
-    enabled: true,
-    intervalMinMinutes: 3,
-    intervalMaxMinutes: 25,
-    claimWindowMinutes: 10,
-    table: [ { weight: 70, min: 5, max: 15 }, { weight: 25, min: 16, max: 40 }, { weight: 5, min: 41, max: 100 } ],
-    embedTitle: "A SterCoin drop appeared!",
-    embedDescription: "First to claim it gets the SterCoins.",
-    claimButtonLabel: "Claim",
-    expiredText: "This drop expired.",
+  enabled: true,
+  eligibleChannelIds: [],     
+  intervalMinMinutes: 3,
+  intervalMaxMinutes: 25,
+  delaySkew: 2,
+  minGapMinutes: 3,     
+  tickSeconds: 10,
+  density: {
+    windowSeconds: 120,
+    perUserCap: 5,               
+    minDensity: 0.05,            
+    refDensity: 0.1,             
+    maxMultiplier: 3,
   },
+  claimWindowMinutes: 10,
+  table: [ { weight: 70, min: 5, max: 15 }, { weight: 25, min: 16, max: 40 }, { weight: 5, min: 41, max: 100 } ],
+  embedTitle: "A SterCoin drop appeared!",
+  embedDescription: "First to claim it gets the SterCoins.",
+  claimButtonLabel: "Claim",
+  expiredText: "This drop expired.",
+},
   gift: { enabled: true, minAmount: 1, maxAmount: null, allowSelf: false, allowBots: false },
   leaderboard: { size: 10 },
   storage: { path: "data/data.json", flushIntervalMs: 3000, backupsEnabled: true, backupIntervalMinutes: 60, backupsToKeep: 24 },
@@ -597,33 +608,138 @@ function tryReward(message) {
 
 module.exports = { tryReward };
 
+=== src/economy/density.js ===
+const config = require("../../config");
+
+const cfg = config.drops.density;
+const events = new Map(); // channelId -> [{ t: timestampMs, u: userId }], oldest first
+
+function channelIds() {
+  const ids = config.drops.eligibleChannelIds;
+  return ids && ids.length ? ids : [config.channels.generalChatId];
+}
+const eligible = new Set(channelIds());
+
+function prune(arr, now) {
+  const cutoff = now - cfg.windowSeconds * 1000;
+  let i = 0;
+  while (i < arr.length && arr[i].t < cutoff) i++;
+  if (i > 0) arr.splice(0, i);
+}
+
+// Call for every incoming message. Only eligible channels are tracked.
+function record(message, now = Date.now()) {
+  if (!eligible.has(message.channel.id)) return;
+  if (message.author.bot || message.webhookId || message.system) return;
+  let arr = events.get(message.channel.id);
+  if (!arr) { arr = []; events.set(message.channel.id, arr); }
+  arr.push({ t: now, u: message.author.id });
+  prune(arr, now);
+}
+
+// Messages per second over the sliding window, with each person's contribution capped.
+function getDensity(channelId, now = Date.now()) {
+  const arr = events.get(channelId);
+  if (!arr) return 0;
+  prune(arr, now);
+  if (arr.length === 0) { events.delete(channelId); return 0; }
+  let count = arr.length;
+  if (cfg.perUserCap > 0) {
+    const perUser = new Map();
+    for (const e of arr) perUser.set(e.u, (perUser.get(e.u) || 0) + 1);
+    count = 0;
+    for (const n of perUser.values()) count += Math.min(n, cfg.perUserCap);
+  }
+  return count / cfg.windowSeconds;
+}
+
+// How fast a channel's drop clock runs: 0 below the threshold, 1x at refDensity, capped at maxMultiplier.
+function multiplier(d) {
+  if (d < cfg.minDensity) return 0;
+  return Math.min(cfg.maxMultiplier, d / cfg.refDensity);
+}
+
+module.exports = { record, getDensity, multiplier, channelIds };
+
 === src/economy/drops.js ===
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 const config = require("../../config");
 const store = require("./store");
 const wallet = require("./wallet");
+const density = require("./density");
 const logger = require("../utils/logger");
-const { randomInt, weightedPick } = require("../utils/random");
-const { randomIntervalMs } = require("../utils/time");
+const { randomInt, weightedPick, skewedFloat } = require("../utils/random");
 
-const drops = new Map();
-let schedulerHandle = null;
+const drops = new Map();   // live drops by id (rebuilt from the saved copy after a restart)
+const clocks = new Map();  // channelId -> { effectiveSec, targetSec, lastDropAt }
+let pending = 0;           // drops currently being posted; they count against the cap
+let tickHandle = null;
+let lastTickAt = 0;
 let clientRef = null;
-let channelRef = null;
 
-function scheduleNext() {
-  if (!config.drops.enabled) return;
-  const delay = randomIntervalMs(config.drops.intervalMinMinutes, config.drops.intervalMaxMinutes);
-  schedulerHandle = setTimeout(() => postDrop(), delay);
+// ---------- persistence (so a restart can't orphan a drop message) ----------
+function persist(drop) {
+  store.update((data) => {
+    if (!data.drops) data.drops = {};
+    data.drops[drop.id] = { id: drop.id, channelId: drop.channelId, messageId: drop.messageId, amount: drop.amount, createdAt: drop.createdAt, expiresAt: drop.expiresAt };
+  });
+}
+function unpersist(id) {
+  if (!store.data.drops || !store.data.drops[id]) return;
+  store.update((data) => { delete data.drops[id]; });
 }
 
-async function postDrop() {
+// ---------- cap on simultaneous drops (all channels combined) ----------
+function activeCount() {
+  let n = pending;
+  for (const d of drops.values()) if (!d.claimed && !d.expired) n++;
+  return n;
+}
+
+// Base delay for the next drop, in "active-chat seconds". Longer delays are more likely than shorter ones.
+function newTargetSec() {
+  const { intervalMinMinutes, intervalMaxMinutes, delaySkew } = config.drops;
+  return skewedFloat(intervalMinMinutes, intervalMaxMinutes, delaySkew) * 60;
+}
+
+// Runs every tickSeconds. Each channel has its own clock that only advances while people are chatting,
+// and advances faster the busier the chat is. When it reaches its target, a drop is posted -
+// unless the global cap is full, in which case the most overdue channel gets the next free slot.
+function tick() {
+  const now = Date.now();
+  const dt = Math.min((now - lastTickAt) / 1000, config.drops.tickSeconds * 3); // cap so a stall/sleep can't skip ahead
+  lastTickAt = now;
+
+  const due = [];
+  for (const [channelId, clock] of clocks) {
+    const d = density.getDensity(channelId, now);
+    const m = density.multiplier(d);
+    if (m === 0) continue; // too quiet: clock paused, no drop possible
+    clock.effectiveSec += dt * m;
+    if (clock.effectiveSec < clock.targetSec) continue;
+    if (now - clock.lastDropAt < config.drops.minGapMinutes * 60000) continue; // hard real-time floor
+    due.push({ channelId, clock, d, m });
+  }
+
+  due.sort((a, b) => (b.clock.effectiveSec - b.clock.targetSec) - (a.clock.effectiveSec - a.clock.targetSec));
+  const cap = config.drops.maxActiveDrops;
+  for (const { channelId, clock, d, m } of due) {
+    if (cap != null && activeCount() >= cap) break; // cap full: these clocks stay "due" and fire when a slot frees up
+    clock.effectiveSec = 0;
+    clock.targetSec = newTargetSec();
+    clock.lastDropAt = now;
+    pending++;
+    postDrop(channelId, d, m);
+  }
+}
+
+async function postDrop(channelId, d, m) {
   try {
-    const channel = clientRef.channels.cache.get(config.channels.generalChatId) || await clientRef.channels.fetch(config.channels.generalChatId).catch(()=>null);
-    if (!channel) { logger.error("drop channel not found"); scheduleNext(); return; }
+    const channel = clientRef.channels.cache.get(channelId) || await clientRef.channels.fetch(channelId).catch(() => null);
+    if (!channel) { logger.error("drop channel not found", { channelId }); return; }
     const entry = weightedPick(config.drops.table);
     const amount = randomInt(entry.min, entry.max);
     const id = Math.random().toString(36).slice(2, 10);
-    const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
     const embed = new EmbedBuilder().setTitle(config.drops.embedTitle).setDescription(config.drops.embedDescription);
     const btn = new ButtonBuilder().setCustomId(`drop:${id}`).setLabel(config.drops.claimButtonLabel).setStyle(ButtonStyle.Primary);
     const row = new ActionRowBuilder().addComponents(btn);
@@ -632,26 +748,27 @@ async function postDrop() {
     const drop = { id, amount, messageId: msg.id, channelId: channel.id, createdAt: Date.now(), expiresAt, claimed: false, claimedBy: null, expired: false, timer: null };
     drop.timer = setTimeout(() => expire(drop), config.drops.claimWindowMinutes * 60000);
     drops.set(id, drop);
+    persist(drop);
+    logger.info("drop posted", { channelId, amount, density: Number(d.toFixed(3)), speed: Number(m.toFixed(2)), active: activeCount() });
   } catch (e) {
     logger.error("drop post failed", { e: e.message });
+  } finally {
+    pending--;
   }
-  scheduleNext();
+}
+
+async function deleteDropMessage(channelId, messageId) {
+  try {
+    const channel = await clientRef.channels.fetch(channelId).catch(() => null);
+    if (channel) await channel.messages.delete(messageId).catch(() => {});
+  } catch (_) {}
 }
 
 async function expire(drop) {
   if (drop.claimed || drop.expired) return;
   drop.expired = true;
-  try {
-    const channel = await clientRef.channels.fetch(drop.channelId).catch(()=>null);
-    const msg = channel ? await channel.messages.fetch(drop.messageId).catch(()=>null) : null;
-    if (msg) {
-      const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
-      const embed = new EmbedBuilder().setTitle(config.drops.embedTitle).setDescription(config.drops.expiredText);
-      const btn = new ButtonBuilder().setCustomId(`drop:${drop.id}`).setLabel(config.drops.claimButtonLabel).setStyle(ButtonStyle.Primary).setDisabled(true);
-      const row = new ActionRowBuilder().addComponents(btn);
-      await msg.edit({ embeds: [embed], components: [row] }).catch(()=>{});
-    }
-  } catch(_){}
+  await deleteDropMessage(drop.channelId, drop.messageId);
+  unpersist(drop.id);
   setTimeout(() => drops.delete(drop.id), 60000);
 }
 
@@ -672,31 +789,61 @@ async function claim(interaction) {
   drop.claimed = true;
   drop.claimedBy = interaction.user.id;
   if (drop.timer) { clearTimeout(drop.timer); drop.timer = null; }
-  await interaction.deferUpdate().catch(()=>{});
+  unpersist(drop.id);
+  await interaction.deferUpdate().catch(() => {});
   wallet.credit(drop.claimedBy, drop.amount, "drop");
   // edit message
   try {
-    const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
     const embed = new EmbedBuilder().setTitle(config.drops.embedTitle).setDescription(`Claimed by <@${drop.claimedBy}> (+${drop.amount})`);
     const btn = new ButtonBuilder().setCustomId(`drop:${drop.id}`).setLabel(config.drops.claimButtonLabel).setStyle(ButtonStyle.Primary).setDisabled(true);
     const row = new ActionRowBuilder().addComponents(btn);
-    await interaction.message.edit({ embeds: [embed], components: [row] }).catch(()=>{});
-  } catch(_){}
-  await interaction.followUp({ content: `You claimed ${drop.amount} 🪙 SterCoins!`, ephemeral: true }).catch(()=>{});
+    await interaction.message.edit({ embeds: [embed], components: [row] }).catch(() => {});
+  } catch (_) {}
+  await interaction.followUp({ content: `You claimed ${drop.amount} 🪙 SterCoins!`, ephemeral: true }).catch(() => {});
   setTimeout(() => drops.delete(drop.id), 60000);
+}
+
+// After a restart: drops that are still inside their claim window come back to life (buttons keep working,
+// they still expire on schedule); drops whose window ended while the bot was down get their message deleted.
+function restoreDrops() {
+  const saved = Object.values((store.data && store.data.drops) || {});
+  if (!saved.length) return;
+  const now = Date.now();
+  const stale = [];
+  for (const rec of saved) {
+    if (rec.expiresAt <= now) { stale.push(rec); continue; }
+    const drop = { ...rec, claimed: false, claimedBy: null, expired: false, timer: null };
+    drop.timer = setTimeout(() => expire(drop), rec.expiresAt - now);
+    drops.set(drop.id, drop);
+  }
+  logger.info("restored drops after restart", { live: saved.length - stale.length, expiredWhileDown: stale.length });
+  (async () => {
+    for (const rec of stale) {
+      await deleteDropMessage(rec.channelId, rec.messageId);
+      unpersist(rec.id);
+    }
+  })().catch((e) => logger.error("drop sweep failed", { e: e.message }));
 }
 
 function init(client) {
   clientRef = client;
-  if (config.drops.enabled) scheduleNext();
+  restoreDrops(); // always, even if drops are now disabled, so no old drop message is left behind
+  if (!config.drops.enabled) return;
+  const now = Date.now();
+  for (const channelId of density.channelIds()) {
+    clocks.set(channelId, { effectiveSec: 0, targetSec: newTargetSec(), lastDropAt: now });
+  }
+  lastTickAt = now;
+  tickHandle = setInterval(tick, config.drops.tickSeconds * 1000);
 }
 
 function verifyChannel(client) {
-  const ch = client.channels.cache.get(config.channels.generalChatId);
-  if (!ch) logger.warn("drop channel not cached; will fetch on post");
+  for (const channelId of density.channelIds()) {
+    if (!client.channels.cache.get(channelId)) logger.warn("drop channel not cached; will fetch on post", { channelId });
+  }
 }
 
-module.exports = { init, verifyChannel, claim, scheduleNext };
+module.exports = { init, verifyChannel, claim };
 
 === src/economy/store.js ===
 const fs = require("fs");
@@ -978,6 +1125,7 @@ module.exports = {
 };
 
 === src/events/messageCreate.js ===
+const density = require("../economy/density")
 const config = require("../../config");
 const activity = require("../economy/activity");
 const commands = require("../commands");
@@ -989,6 +1137,7 @@ module.exports = {
       if (message.author.bot) return;
       if (!message.guild || message.guild.id !== config.discord.guildId) return;
       if (message.webhookId) return;
+      density.record(message);
       activity.tryReward(message);
       const prefix = config.commands.prefix;
       if (!message.content.startsWith(prefix)) return;
@@ -1059,7 +1208,7 @@ function validate(cfg) {
   if (!Number.isInteger(cfg.drops.intervalMaxMinutes) || cfg.drops.intervalMaxMinutes <= 0) e("drops.intervalMaxMinutes");
   if (cfg.drops.intervalMinMinutes > cfg.drops.intervalMaxMinutes) e("drops intervalMin>intervalMax");
   if (!Number.isInteger(cfg.drops.claimWindowMinutes) || cfg.drops.claimWindowMinutes <= 0) e("drops.claimWindowMinutes");
-  if (cfg.drops.claimWindowMinutes > cfg.drops.intervalMinMinutes) console.warn("[config] claim window longer than min interval (overlapping drops allowed)");
+  if (cfg.drops.claimWindowMinutes > cfg.drops.minGapMinutes) console.warn("[config] claim window longer than min gap (overlapping drops allowed)");
   if (!Array.isArray(cfg.drops.table) || cfg.drops.table.length === 0) e("drops.table");
   let total = 0;
   for (const t of cfg.drops.table || []) {
@@ -1076,6 +1225,18 @@ function validate(cfg) {
   if (!Number.isInteger(cfg.storage.flushIntervalMs) || cfg.storage.flushIntervalMs < 500) e("storage.flushIntervalMs");
   if (!Number.isInteger(cfg.storage.backupIntervalMinutes) || cfg.storage.backupIntervalMinutes <= 0) e("storage.backupIntervalMinutes");
   if (!Number.isInteger(cfg.storage.backupsToKeep) || cfg.storage.backupsToKeep <= 0) e("storage.backupsToKeep");
+  const dr = cfg.drops, dn = dr.density || {};
+  const posNum = (x) => typeof x === "number" && Number.isFinite(x) && x > 0;
+  if (!Array.isArray(dr.eligibleChannelIds) || !dr.eligibleChannelIds.every(isNumStr)) e("drops.eligibleChannelIds");
+  if (!posNum(dr.delaySkew) || dr.delaySkew < 1) e("drops.delaySkew must be >= 1");
+  if (typeof dr.minGapMinutes !== "number" || dr.minGapMinutes < 0) e("drops.minGapMinutes");
+  if (!Number.isInteger(dr.tickSeconds) || dr.tickSeconds < 1) e("drops.tickSeconds");
+  if (!posNum(dn.windowSeconds)) e("drops.density.windowSeconds");
+  if (!Number.isInteger(dn.perUserCap) || dn.perUserCap < 0) e("drops.density.perUserCap");
+  if (!posNum(dn.minDensity)) e("drops.density.minDensity");
+  if (!posNum(dn.refDensity)) e("drops.density.refDensity");
+  if (!posNum(dn.maxMultiplier)) e("drops.density.maxMultiplier");
+  if (dn.perUserCap > 0 && dn.perUserCap / dn.windowSeconds >= dn.minDensity) console.warn("[config] drops.density: one person alone can reach minDensity");
   return errors;
 }
 module.exports = { validate };
@@ -1096,6 +1257,8 @@ module.exports = { debug:(m,c)=>log("debug",m,c), info:(m,c)=>log("info",m,c), w
 function randomInt(min,max){ return Math.floor(Math.random()*(max-min+1))+min; }
 function weightedPick(entries){ const total = entries.reduce((s,e)=>s+e.weight,0); let r = Math.floor(Math.random()*total)+1; for (const e of entries){ r -= e.weight; if (r <= 0) return e; } return entries[entries.length-1]; }
 module.exports = { randomInt, weightedPick };
+function skewedFloat(min, max, shape = 1){ return min + (max - min) * Math.pow(Math.random(), 1 / shape); }
+module.exports = { randomInt, weightedPick, skewedFloat };
 
 === src/utils/time.js ===
 const config = require("../../config");
