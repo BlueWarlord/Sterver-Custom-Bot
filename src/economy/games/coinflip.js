@@ -64,10 +64,10 @@ function play(userId, bet, guess) {
     u.totalWagered += bet;
     u.lastFlipAt = now();
 
-    if (coinSide === guessSide) {
-      const profit = bet * 1.5;
-      u.balance += bet * 2.5;
-      u.totalWon += profit;
+     if (coinSide === guessSide) {
+       const profit = bet * 2;
+       u.balance += bet * 3;
+       u.totalWon += profit;
       result = {
         ok: true,
         won: true,

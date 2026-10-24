@@ -35,10 +35,10 @@ test("coinflip play: win path", async () => {
     assert.strictEqual(res.result, "Heads");
     assert.strictEqual(res.guess, "Heads");
     assert.strictEqual(res.bet, 100);
-    assert.strictEqual(res.profit, 150);
-    assert.strictEqual(res.balance, 1150);
+    assert.strictEqual(res.profit, 200);
+    assert.strictEqual(res.balance, 1200);
     assert.strictEqual(res.totalWagered, 100);
-    assert.strictEqual(res.totalWon, 150);
+    assert.strictEqual(res.totalWon, 200);
     assert.strictEqual(res.totalLost, 0);
   } finally {
     Math.random = orig;
