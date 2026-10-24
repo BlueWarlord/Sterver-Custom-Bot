@@ -1,3 +1,4 @@
+const density = require("../economy/density")
 const config = require("../../config");
 const activity = require("../economy/activity");
 const commands = require("../commands");
@@ -9,6 +10,7 @@ module.exports = {
       if (message.author.bot) return;
       if (!message.guild || message.guild.id !== config.discord.guildId) return;
       if (message.webhookId) return;
+      density.record(message);
       activity.tryReward(message);
       const prefix = config.commands.prefix;
       if (!message.content.startsWith(prefix)) return;

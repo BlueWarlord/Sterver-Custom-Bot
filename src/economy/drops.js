@@ -42,16 +42,9 @@ async function expire(drop) {
   if (drop.claimed || drop.expired) return;
   drop.expired = true;
   try {
-    const channel = await clientRef.channels.fetch(drop.channelId).catch(()=>null);
-    const msg = channel ? await channel.messages.fetch(drop.messageId).catch(()=>null) : null;
-    if (msg) {
-      const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
-      const embed = new EmbedBuilder().setTitle(config.drops.embedTitle).setDescription(config.drops.expiredText);
-      const btn = new ButtonBuilder().setCustomId(`drop:${drop.id}`).setLabel(config.drops.claimButtonLabel).setStyle(ButtonStyle.Primary).setDisabled(true);
-      const row = new ActionRowBuilder().addComponents(btn);
-      await msg.edit({ embeds: [embed], components: [row] }).catch(()=>{});
-    }
-  } catch(_){}
+    const channel = await clientRef.channels.fetch(drop.channelId).catch(() => null);
+    if (channel) await channel.messages.delete(drop.messageId).catch(() => {});
+  } catch (_) {}
   setTimeout(() => drops.delete(drop.id), 60000);
 }
 
@@ -67,6 +60,7 @@ async function claim(interaction) {
   if (Date.now() >= drop.expiresAt || drop.expired) {
     drop.expired = true;
     return interaction.reply({ content: config.drops.expiredText, ephemeral: true });
+    setTimeout(() => interaction.message.delete().catch(() => {}), 30000);
   }
   // atomic
   drop.claimed = true;

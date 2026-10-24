@@ -22,7 +22,7 @@ function validate(cfg) {
   if (!Number.isInteger(cfg.drops.intervalMaxMinutes) || cfg.drops.intervalMaxMinutes <= 0) e("drops.intervalMaxMinutes");
   if (cfg.drops.intervalMinMinutes > cfg.drops.intervalMaxMinutes) e("drops intervalMin>intervalMax");
   if (!Number.isInteger(cfg.drops.claimWindowMinutes) || cfg.drops.claimWindowMinutes <= 0) e("drops.claimWindowMinutes");
-  if (cfg.drops.claimWindowMinutes > cfg.drops.intervalMinMinutes) console.warn("[config] claim window longer than min interval (overlapping drops allowed)");
+  if (cfg.drops.claimWindowMinutes > cfg.drops.minGapMinutes) console.warn("[config] claim window longer than min gap (overlapping drops allowed)");
   if (!Array.isArray(cfg.drops.table) || cfg.drops.table.length === 0) e("drops.table");
   let total = 0;
   for (const t of cfg.drops.table || []) {
@@ -39,6 +39,18 @@ function validate(cfg) {
   if (!Number.isInteger(cfg.storage.flushIntervalMs) || cfg.storage.flushIntervalMs < 500) e("storage.flushIntervalMs");
   if (!Number.isInteger(cfg.storage.backupIntervalMinutes) || cfg.storage.backupIntervalMinutes <= 0) e("storage.backupIntervalMinutes");
   if (!Number.isInteger(cfg.storage.backupsToKeep) || cfg.storage.backupsToKeep <= 0) e("storage.backupsToKeep");
+  const dr = cfg.drops, dn = dr.density || {};
+  const posNum = (x) => typeof x === "number" && Number.isFinite(x) && x > 0;
+  if (!Array.isArray(dr.eligibleChannelIds) || !dr.eligibleChannelIds.every(isNumStr)) e("drops.eligibleChannelIds");
+  if (!posNum(dr.delaySkew) || dr.delaySkew < 1) e("drops.delaySkew must be >= 1");
+  if (typeof dr.minGapMinutes !== "number" || dr.minGapMinutes < 0) e("drops.minGapMinutes");
+  if (!Number.isInteger(dr.tickSeconds) || dr.tickSeconds < 1) e("drops.tickSeconds");
+  if (!posNum(dn.windowSeconds)) e("drops.density.windowSeconds");
+  if (!Number.isInteger(dn.perUserCap) || dn.perUserCap < 0) e("drops.density.perUserCap");
+  if (!posNum(dn.minDensity)) e("drops.density.minDensity");
+  if (!posNum(dn.refDensity)) e("drops.density.refDensity");
+  if (!posNum(dn.maxMultiplier)) e("drops.density.maxMultiplier");
+  if (dn.perUserCap > 0 && dn.perUserCap / dn.windowSeconds >= dn.minDensity) console.warn("[config] drops.density: one person alone can reach minDensity");
   return errors;
 }
 module.exports = { validate };
