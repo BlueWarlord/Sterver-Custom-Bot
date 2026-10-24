@@ -16,9 +16,9 @@
 
 | Topic | Decision |
 |---|---|
-| Payout | Even money, fair 50/50 coin. Bet `X`: win = net +`X` (stake returned + `X` profit), loss = net -`X`. No house edge. |
+| Payout | Fair 50/50 coin. Bet `X`: win = net +1.5`X` (stake returned + 1.5`X` profit, total return 2.5`X`), loss = net -`X`. |
 | Config | `config.gambling = { enabled: true, minBet: 1, maxBet: 1000, cooldownSeconds: 5 }`. All validated at startup. |
-| Command | `/coinflip` with integer `amount` (min/max from config) and string choice `guess` (Heads/Tails). Prefix `.coinflip <amount> <heads|tails>`, case-insensitive, order-independent. Name `coinflip`, prefix alias `flip`. |
+| Command | `/coinflip` with integer `amount` (min/max from config) and string choice `guess` (Heads/Tails). Prefix `.coinflip <amount> <heads|tails>`, case-insensitive, order-independent. Name `coinflip`, prefix aliases `flip`, `cf`. |
 | Cooldown | Per-user, `gambling.cooldownSeconds` (default 5s). Cooldown checked and consumed inside one `store.update`. On cooldown: ephemeral reply with remaining time via `formatDuration`. |
 | Stats | Per-user `totalWagered`, `totalWon` (profit), `totalLost`, `lastFlipAt`. Additive fields; `ensureUser` initializes them, old records default to 0. `schemaVersion` stays `1`. |
 | Visibility | Flip result (coin side, win/loss, amount, new balance) public in channel. Failures (disabled, invalid bet, insufficient funds, cooldown) ephemeral. |
@@ -31,9 +31,9 @@
 3. `src/economy/store.js` — `ensureUser` initializes `totalWagered: 0`, `totalWon: 0`, `totalLost: 0`, `lastFlipAt: null`.
 4. `src/economy/games/coinflip.js` (new) — `play(userId, bet, guess)`:
    - Validate: `gambling.enabled`; bet is integer, `minBet <= bet <= maxBet`; guess is heads/tails.
-   - One `store.update`: ensure user, cooldown check vs `lastFlipAt`, `balance >= bet`, then `balance -= bet`; on win `balance += bet * 2`; update `totalWagered += bet`, `totalWon += bet` (win) or `totalLost += bet` (loss); set `lastFlipAt = now()`.
+    - One `store.update`: ensure user, cooldown check vs `lastFlipAt`, `balance >= bet`, then `balance -= bet`; on win `balance += bet * 2.5` (stake + 1.5× profit); update `totalWagered += bet`, `totalWon += bet * 1.5` (win) or `totalLost += bet` (loss); set `lastFlipAt = now()`.
    - Return `{ ok, code?, won?, result, guess, bet, balance, totalWagered, totalWon, totalLost, remainingMs? }`. Error codes: `GAMBLING_DISABLED`, `INVALID_BET`, `BET_TOO_SMALL`, `BET_TOO_LARGE`, `INSUFFICIENT_FUNDS`, `ON_COOLDOWN`.
-5. `src/commands/coinflip.js` (new) — command module: slash builder (`amount` integer min/max from config, `guess` string choices Heads/Tails) + prefix parsing (extract integer bet + heads/tails token from args, either order). Slash: `executeSlash`; prefix: `executePrefix`. Both call `coinflip.play` and format: public result message; ephemeral errors/cooldowns.
+5. `src/commands/coinflip.js` (new) — command module: slash builder (`amount` integer min/max from config, `guess` string choices Heads/Tails) + prefix parsing (extract integer bet + heads/tails token from args, either order). Registered under name `coinflip` with prefix aliases `flip` and `cf`. Slash: `executeSlash`; prefix: `executePrefix`. Both call `coinflip.play` and format: public result message; ephemeral errors/cooldowns.
 6. `src/commands/index.js` — add `coinflip` to the exported array.
 7. Tests (`node --test`): `coinflip.play` win path, loss path, insufficient funds, cooldown enforcement, invalid bet, disabled gambling, guess case-insensitivity/order-independence; config-validate new rules; `ensureUser` new fields default to 0.
 8. Re-run `node deploy-commands.js` so the new slash command registers (requires real `.env`).

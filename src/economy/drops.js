@@ -1,3 +1,4 @@
+const { MessageFlags } = require("discord.js");
 const config = require("../../config");
 const store = require("./store");
 const wallet = require("./wallet");
@@ -59,14 +60,14 @@ async function claim(interaction) {
   const id = interaction.customId.split(":")[1];
   const drop = drops.get(id);
   if (!drop) {
-    return interaction.reply({ content: "This drop is no longer active.", ephemeral: true });
+    return interaction.reply({ content: "This drop is no longer active.", flags: MessageFlags.Ephemeral });
   }
   if (drop.claimed) {
-    return interaction.reply({ content: "Already claimed.", ephemeral: true });
+    return interaction.reply({ content: "Already claimed.", flags: MessageFlags.Ephemeral });
   }
   if (Date.now() >= drop.expiresAt || drop.expired) {
     drop.expired = true;
-    return interaction.reply({ content: config.drops.expiredText, ephemeral: true });
+    return interaction.reply({ content: config.drops.expiredText, flags: MessageFlags.Ephemeral });
   }
   // atomic
   drop.claimed = true;
@@ -82,7 +83,7 @@ async function claim(interaction) {
     const row = new ActionRowBuilder().addComponents(btn);
     await interaction.message.edit({ embeds: [embed], components: [row] }).catch(()=>{});
   } catch(_){}
-  await interaction.followUp({ content: `You claimed ${drop.amount} 🪙 SterCoins!`, ephemeral: true }).catch(()=>{});
+  await interaction.followUp({ content: `You claimed ${drop.amount} 🪙 SterCoins!`, flags: MessageFlags.Ephemeral }).catch(()=>{});
   setTimeout(() => drops.delete(drop.id), 60000);
 }
 
