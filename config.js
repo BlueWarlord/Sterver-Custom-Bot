@@ -1,6 +1,6 @@
 module.exports = {
-  discord: { guildId: "PASTE_GUILD_ID" },
-  channels: { generalChatId: "PASTE_CHANNEL_ID" },
+  discord: { guildId: "1563216575652433993" },
+  channels: { generalChatId: "1563216576378052620" },
   currency: { name: "SterCoin", plural: "SterCoins", emoji: "🪙", thousandsSeparator: "," },
   commands: { prefix: "." },
   economy: { startingBalance: 0 },

@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, Events } = require("discord.js");
 const config = require("./config");
 const { validate } = require("./src/utils/config-validate");
 const store = require("./src/economy/store");
@@ -16,7 +16,7 @@ if (!process.env.CLIENT_ID || !/^\d+$/.test(process.env.CLIENT_ID)) { console.er
   await store.load();
   store.start();
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
-  client.once("ready", () => readyEvent.execute(client));
+  client.once(Events.ClientReady, () => readyEvent.execute(client));
   client.on("messageCreate", (m) => messageCreateEvent.execute(m));
   client.on("interactionCreate", (i) => interactionCreateEvent.execute(i));
   const shutdown = require("./src/events/shutdown");

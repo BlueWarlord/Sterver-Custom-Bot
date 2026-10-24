@@ -1,4 +1,4 @@
-const { SlashCommandBuilder } = require("discord.js");
+const { SlashCommandBuilder, MessageFlags } = require("discord.js");
 const config = require("../../config");
 const wallet = require("../economy/wallet");
 const { formatAmount } = require("../utils/format");
@@ -25,9 +25,9 @@ module.exports = {
     const target = interaction.options.getUser("user");
     const amount = interaction.options.getInteger("amount");
     const err = validate(interaction.user, target, amount);
-    if (err) return interaction.reply({ content: err, ephemeral: true });
+    if (err) return interaction.reply({ content: err, flags: MessageFlags.Ephemeral });
     const res = wallet.transfer(interaction.user.id, target.id, amount);
-    if (!res.ok) return interaction.reply({ content: "Transfer failed.", ephemeral: true });
+    if (!res.ok) return interaction.reply({ content: "Transfer failed.", flags: MessageFlags.Ephemeral });
     await interaction.reply({ content: `${interaction.user} gave ${target} ${formatAmount(amount)}.` });
   },
   async executePrefix(message, args) {
