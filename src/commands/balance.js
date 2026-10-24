@@ -6,6 +6,7 @@ const { formatAmount } = require("../utils/format");
 
 module.exports = {
   name: "balance",
+  aliases: ["bal"],
   slash: new SlashCommandBuilder().setName("balance").setDescription("Show balance").addUserOption(o=>o.setName("user").setDescription("User").setRequired(false)),
   async executeSlash(interaction) {
     const target = interaction.options.getUser("user") || interaction.user;

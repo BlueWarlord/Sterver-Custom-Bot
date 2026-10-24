@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "description": "SterCoin economy bot",
   "main": "index.js",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node index.js",
     "deploy": "node deploy-commands.js",

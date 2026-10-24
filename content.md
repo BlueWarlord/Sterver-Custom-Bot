@@ -523,15 +523,15 @@ const config = require('../../config');
 
 module.exports = {
   name: 'help',
-  aliases: ['h'],
+  aliases: [],
   slash: new SlashCommandBuilder().setName('help').setDescription('Show commands'),
   async executeSlash(interaction) {
     const cmds = require('./index').map(c => '`' + config.commands.prefix + c.name + '`').join(', ');
-    await interaction.reply({ content: 'Commands: ' + cmds + '\nTip: Use `.help` or `.h`.', ephemeral: true });
+    await interaction.reply({ content: 'Commands: ' + cmds + '\nTip: Use `.help`.', ephemeral: true });
   },
   async executePrefix(message) {
     const cmds = require('./index').map(c => '`' + config.commands.prefix + c.name + '`').join(', ');
-    await message.reply({ content: 'Commands: ' + cmds + '\nTip: Use `.help` or `.h`.', allowedMentions: { repliedUser: false } });
+    await message.reply({ content: 'Commands: ' + cmds + '\nTip: Use `.help`.', allowedMentions: { repliedUser: false } });
   },
 };
 

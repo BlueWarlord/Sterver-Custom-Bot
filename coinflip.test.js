@@ -149,7 +149,7 @@ test("coinflip play: gambling disabled", async () => {
 
 test("coinflip command: slash builder shape", async () => {
   assert.strictEqual(coinflipCmd.name, "coinflip");
-  assert.deepStrictEqual(coinflipCmd.aliases, ["flip", "cf"]);
+  assert.deepStrictEqual(coinflipCmd.aliases, ["cf"]);
   const json = coinflipCmd.slash.toJSON();
   assert.strictEqual(json.name, "coinflip");
   const amountOpt = json.options.find(o => o.name === "amount");

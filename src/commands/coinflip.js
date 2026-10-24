@@ -39,7 +39,7 @@ function formatResult(res, user) {
 
 module.exports = {
   name: "coinflip",
-  aliases: ["flip", "cf"],
+  aliases: ["cf"],
   slash: new SlashCommandBuilder()
     .setName("coinflip")
     .setDescription("Flip a coin and bet on the outcome")

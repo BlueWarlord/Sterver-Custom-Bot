@@ -19,6 +19,14 @@ module.exports = {
   },
   gift: { enabled: true, minAmount: 1, maxAmount: null, allowSelf: false, allowBots: false },
   gambling: { enabled: true, minBet: 1, maxBet: 1000, cooldownSeconds: 7 },
+  blackjack: {
+    minBet: 1,
+    maxBet: 1000,
+    cooldownSeconds: 7,
+    blackjackPayout: 1.5,
+    dealerHitsSoft17: false,
+    timeoutMs: 60000,
+  },
   leaderboard: { size: 10 },
   storage: { path: "data/data.json", flushIntervalMs: 3000, backupsEnabled: true, backupIntervalMinutes: 60, backupsToKeep: 24 },
 };

@@ -43,6 +43,14 @@ function validate(cfg) {
   if (!Number.isInteger(cfg.gambling.minBet) || cfg.gambling.minBet < 1) e("gambling.minBet");
   if (!Number.isInteger(cfg.gambling.maxBet) || cfg.gambling.maxBet < cfg.gambling.minBet) e("gambling.maxBet");
   if (!Number.isInteger(cfg.gambling.cooldownSeconds) || cfg.gambling.cooldownSeconds <= 0) e("gambling.cooldownSeconds");
+  if (cfg.blackjack) {
+    if (!Number.isInteger(cfg.blackjack.minBet) || cfg.blackjack.minBet < 1) e("blackjack.minBet");
+    if (!Number.isInteger(cfg.blackjack.maxBet) || cfg.blackjack.maxBet < cfg.blackjack.minBet) e("blackjack.maxBet");
+    if (!Number.isInteger(cfg.blackjack.cooldownSeconds) || cfg.blackjack.cooldownSeconds <= 0) e("blackjack.cooldownSeconds");
+    if (typeof cfg.blackjack.blackjackPayout !== "number" || cfg.blackjack.blackjackPayout <= 0) e("blackjack.blackjackPayout");
+    if (typeof cfg.blackjack.dealerHitsSoft17 !== "boolean") e("blackjack.dealerHitsSoft17");
+    if (!Number.isInteger(cfg.blackjack.timeoutMs) || cfg.blackjack.timeoutMs <= 0) e("blackjack.timeoutMs");
+  }
   return errors;
 }
 module.exports = { validate };

@@ -18,6 +18,7 @@ function validate(sender, target, amount) {
 
 module.exports = {
   name: "give",
+  aliases: ["pay"],
   slash: new SlashCommandBuilder().setName("give").setDescription("Gift SterCoins")
     .addUserOption(o=>o.setName("user").setDescription("Recipient").setRequired(true))
     .addIntegerOption(o=>o.setName("amount").setDescription("Amount").setRequired(true).setMinValue(1)),

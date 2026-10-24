@@ -25,6 +25,7 @@ function ensureUserIn(data, userId) {
       totalWon: 0,
       totalLost: 0,
       lastFlipAt: null,
+      lastBlackjackAt: null,
       createdAt: Date.now(),
     };
     data.users[userId] = u;
@@ -33,6 +34,7 @@ function ensureUserIn(data, userId) {
     if (u.totalWon == null) u.totalWon = 0;
     if (u.totalLost == null) u.totalLost = 0;
     if (u.lastFlipAt == null) u.lastFlipAt = null;
+    if (u.lastBlackjackAt == null) u.lastBlackjackAt = null;
   }
   return u;
 }
