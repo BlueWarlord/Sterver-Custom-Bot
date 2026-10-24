@@ -1,26 +1,49 @@
-const config = require("../../config");
-
 function isNumStr(v) {
   return typeof v === "string" && /^\d+$/.test(v);
 }
 
 function validate(cfg) {
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+    return ["config must be an object"];
+  }
+
   const errors = [];
   const e = (msg) => errors.push(msg);
+
+  // Required configuration sections
+  const requiredSections = [
+    "discord",
+    "channels",
+    "currency",
+    "commands",
+    "economy",
+    "activity",
+    "daily",
+    "drops",
+    "gift",
+    "leaderboard",
+    "storage",
+    "gambling",
+  ];
+
+  for (const section of requiredSections) {
+    if (
+      !cfg[section] ||
+      typeof cfg[section] !== "object" ||
+      Array.isArray(cfg[section])
+    ) {
+      e(`${section} must be a configuration object`);
+    }
+  }
+
+  // Prevent property-access errors when required sections are missing.
+  if (errors.length > 0) {
+    return errors;
+  }
 
   // Discord configuration
   if (!isNumStr(cfg.discord.guildId)) {
     e("discord.guildId must be numeric string");
-  }
-
-    // Blackjack configuration
-  if (cfg.blackjack) {
-    if (!Number.isInteger(cfg.blackjack.minBet) || cfg.blackjack.minBet < 1) e("blackjack.minBet");
-    if (!Number.isInteger(cfg.blackjack.maxBet) || cfg.blackjack.maxBet < cfg.blackjack.minBet) e("blackjack.maxBet");
-    if (!Number.isInteger(cfg.blackjack.cooldownSeconds) || cfg.blackjack.cooldownSeconds <= 0) e("blackjack.cooldownSeconds");
-    if (typeof cfg.blackjack.blackjackPayout !== "number" || cfg.blackjack.blackjackPayout <= 0) e("blackjack.blackjackPayout");
-    if (typeof cfg.blackjack.dealerHitsSoft17 !== "boolean") e("blackjack.dealerHitsSoft17");
-    if (!Number.isInteger(cfg.blackjack.timeoutMs) || cfg.blackjack.timeoutMs <= 0) e("blackjack.timeoutMs");
   }
 
   if (
@@ -64,11 +87,17 @@ function validate(cfg) {
     e("activity.cooldownSeconds");
   }
 
-  if (!Number.isInteger(cfg.activity.amountMin) || cfg.activity.amountMin < 0) {
+  if (
+    !Number.isInteger(cfg.activity.amountMin) ||
+    cfg.activity.amountMin < 0
+  ) {
     e("activity.amountMin");
   }
 
-  if (!Number.isInteger(cfg.activity.amountMax) || cfg.activity.amountMax < 0) {
+  if (
+    !Number.isInteger(cfg.activity.amountMax) ||
+    cfg.activity.amountMax < 0
+  ) {
     e("activity.amountMax");
   }
 
@@ -98,6 +127,7 @@ function validate(cfg) {
 
   if (
     typeof cfg.daily.cooldownHours !== "number" ||
+    !Number.isFinite(cfg.daily.cooldownHours) ||
     cfg.daily.cooldownHours <= 0
   ) {
     e("daily.cooldownHours");
@@ -220,7 +250,11 @@ function validate(cfg) {
     e("drops.maxNegativeAmount must be a non-negative integer");
   }
 
-  if (d.allowNegativeAmounts && d.maxNegativeAmount < 1) {
+  if (
+    d.allowNegativeAmounts &&
+    Number.isInteger(d.maxNegativeAmount) &&
+    d.maxNegativeAmount < 1
+  ) {
     e("drops.maxNegativeAmount must be positive when negative drops are enabled");
   }
 
@@ -235,39 +269,67 @@ function validate(cfg) {
     let usableWeight = 0;
 
     for (const entry of d.table) {
-      if (!Number.isInteger(entry.weight) || entry.weight <= 0) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        e("drops.table entries must be objects");
+        continue;
+      }
+
+      const validMin = Number.isInteger(entry.min);
+      const validMax = Number.isInteger(entry.max);
+      const validWeight =
+        Number.isInteger(entry.weight) && entry.weight > 0;
+
+      if (!validWeight) {
         e("drops.table entries must have positive integer weights");
       } else {
         totalWeight += entry.weight;
-
-        if (d.allowNegativeAmounts || entry.min >= 0) {
-          usableWeight += entry.weight;
-        }
       }
 
-      if (!Number.isInteger(entry.min)) {
+      if (!validMin) {
         e("drops.table entry min must be an integer");
       }
 
-      if (!Number.isInteger(entry.max)) {
+      if (!validMax) {
         e("drops.table entry max must be an integer");
       }
 
-      if (
-        Number.isInteger(entry.min) &&
-        Number.isInteger(entry.max) &&
-        entry.min > entry.max
-      ) {
-        e("drops.table entry min cannot exceed max");
-      }
+      if (validMin && validMax) {
+        if (entry.min > entry.max) {
+          e("drops.table entry min cannot exceed max");
+          continue;
+        }
 
-      if (
-        Number.isInteger(entry.min) &&
-        Number.isInteger(entry.max) &&
-        entry.min < 0 &&
-        entry.max >= 0
-      ) {
-        e("drops.table ranges must not cross zero");
+        if (entry.min < 0 && entry.max >= 0) {
+          e("drops.table ranges must not cross zero");
+        }
+
+        const isNegativeEntry = entry.min < 0;
+
+        if (d.allowNegativeAmounts || !isNegativeEntry) {
+          if (validWeight) {
+            usableWeight += entry.weight;
+          }
+        }
+
+        // Enforce positive amount cap.
+        if (
+          entry.min >= 0 &&
+          Number.isInteger(d.maxPositiveAmount) &&
+          d.maxPositiveAmount >= 1 &&
+          entry.max > d.maxPositiveAmount
+        ) {
+          e("drops.table positive range exceeds drops.maxPositiveAmount");
+        }
+
+        // Enforce negative amount cap.
+        if (
+          entry.min < 0 &&
+          Number.isInteger(d.maxNegativeAmount) &&
+          d.maxNegativeAmount >= 0 &&
+          entry.min < -d.maxNegativeAmount
+        ) {
+          e("drops.table negative range exceeds drops.maxNegativeAmount");
+        }
       }
     }
 
@@ -349,7 +411,57 @@ function validate(cfg) {
     e("gambling.cooldownSeconds");
   }
 
->>>>>>> probability
+  // Blackjack configuration is optional.
+  if (cfg.blackjack !== undefined) {
+    if (
+      !cfg.blackjack ||
+      typeof cfg.blackjack !== "object" ||
+      Array.isArray(cfg.blackjack)
+    ) {
+      e("blackjack must be a configuration object");
+    } else {
+      if (
+        !Number.isInteger(cfg.blackjack.minBet) ||
+        cfg.blackjack.minBet < 1
+      ) {
+        e("blackjack.minBet");
+      }
+
+      if (
+        !Number.isInteger(cfg.blackjack.maxBet) ||
+        cfg.blackjack.maxBet < cfg.blackjack.minBet
+      ) {
+        e("blackjack.maxBet");
+      }
+
+      if (
+        !Number.isInteger(cfg.blackjack.cooldownSeconds) ||
+        cfg.blackjack.cooldownSeconds <= 0
+      ) {
+        e("blackjack.cooldownSeconds");
+      }
+
+      if (
+        typeof cfg.blackjack.blackjackPayout !== "number" ||
+        !Number.isFinite(cfg.blackjack.blackjackPayout) ||
+        cfg.blackjack.blackjackPayout <= 0
+      ) {
+        e("blackjack.blackjackPayout");
+      }
+
+      if (typeof cfg.blackjack.dealerHitsSoft17 !== "boolean") {
+        e("blackjack.dealerHitsSoft17");
+      }
+
+      if (
+        !Number.isInteger(cfg.blackjack.timeoutMs) ||
+        cfg.blackjack.timeoutMs <= 0
+      ) {
+        e("blackjack.timeoutMs");
+      }
+    }
+  }
+
   return errors;
 }
 
