@@ -98,9 +98,14 @@ function getUser(userId) {
 function ensureUser(userId) {
   let u = store.data.users[userId];
   if (!u) {
-    u = { balance: config.economy.startingBalance, lastDailyAt: null, lastActivityRewardAt: null, totalEarned: 0, totalGifted: 0, totalReceived: 0, createdAt: Date.now() };
+    u = { balance: config.economy.startingBalance, lastDailyAt: null, lastActivityRewardAt: null, totalEarned: 0, totalGifted: 0, totalReceived: 0, totalWagered: 0, totalWon: 0, totalLost: 0, lastFlipAt: null, createdAt: Date.now() };
     store.data.users[userId] = u;
     scheduleFlush();
+  } else {
+    if (u.totalWagered == null) u.totalWagered = 0;
+    if (u.totalWon == null) u.totalWon = 0;
+    if (u.totalLost == null) u.totalLost = 0;
+    if (u.lastFlipAt == null) u.lastFlipAt = null;
   }
   return u;
 }

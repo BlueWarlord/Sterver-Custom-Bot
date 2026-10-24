@@ -39,6 +39,10 @@ function validate(cfg) {
   if (!Number.isInteger(cfg.storage.flushIntervalMs) || cfg.storage.flushIntervalMs < 500) e("storage.flushIntervalMs");
   if (!Number.isInteger(cfg.storage.backupIntervalMinutes) || cfg.storage.backupIntervalMinutes <= 0) e("storage.backupIntervalMinutes");
   if (!Number.isInteger(cfg.storage.backupsToKeep) || cfg.storage.backupsToKeep <= 0) e("storage.backupsToKeep");
+  if (typeof cfg.gambling.enabled !== "boolean") e("gambling.enabled");
+  if (!Number.isInteger(cfg.gambling.minBet) || cfg.gambling.minBet < 1) e("gambling.minBet");
+  if (!Number.isInteger(cfg.gambling.maxBet) || cfg.gambling.maxBet < cfg.gambling.minBet) e("gambling.maxBet");
+  if (!Number.isInteger(cfg.gambling.cooldownSeconds) || cfg.gambling.cooldownSeconds <= 0) e("gambling.cooldownSeconds");
   return errors;
 }
 module.exports = { validate };

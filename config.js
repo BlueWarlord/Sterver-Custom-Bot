@@ -18,6 +18,7 @@ module.exports = {
     expiredText: "This drop expired.",
   },
   gift: { enabled: true, minAmount: 1, maxAmount: null, allowSelf: false, allowBots: false },
+  gambling: { enabled: true, minBet: 1, maxBet: 1000, cooldownSeconds: 7 },
   leaderboard: { size: 10 },
   storage: { path: "data/data.json", flushIntervalMs: 3000, backupsEnabled: true, backupIntervalMinutes: 60, backupsToKeep: 24 },
 };
