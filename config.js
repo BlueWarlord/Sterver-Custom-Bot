@@ -21,11 +21,11 @@ module.exports = {
     // Baseline timing model
     // Each channel independently chooses a baseline interval from this range.
     // These are probability parameters, not guaranteed spawn times.
-    intervalMinMinutes: 3,
-    intervalMaxMinutes: 25,
+    intervalMinMinutes: 1,
+    intervalMaxMinutes: 10,
 
     // Minimum real-time gap between drops in the same channel.
-    minGapMinutes: 2,
+    minGapMinutes: 1,
 
     // How often the scheduler checks activity and drop probability.
     tickSeconds: 5,
@@ -40,7 +40,7 @@ module.exports = {
 
     // A single user can contribute at most this many messages
     // to the rolling activity window.
-    maxMessagesPerUserPerWindow: 3,
+    maxMessagesPerUserPerWindow: 5,
 
     // Higher values make drop probability increase more sharply
     // as the message rate rises above the threshold.
@@ -51,7 +51,7 @@ module.exports = {
     maxRateMultiplier: 5,
 
     // How long a drop remains claimable.
-    claimWindowMinutes: 10,
+    claimWindowMinutes: 5,
 
     // Message cleanup delays, in seconds.
     // 0 means immediate deletion.
