@@ -98,7 +98,7 @@ function getUser(userId) {
 function ensureUser(userId) {
   let u = store.data.users[userId];
   if (!u) {
-    u = { balance: config.economy.startingBalance, lastDailyAt: null, lastActivityRewardAt: null, totalEarned: 0, totalGifted: 0, totalReceived: 0, totalWagered: 0, totalWon: 0, totalLost: 0, lastFlipAt: null, lastBlackjackAt: null, createdAt: Date.now() };
+    u = { balance: config.economy.startingBalance, lastDailyAt: null, lastActivityRewardAt: null, totalEarned: 0, totalGifted: 0, totalReceived: 0, totalWagered: 0, totalWon: 0, totalLost: 0, lastFlipAt: null, lastBlackjackAt: null, createdAt: Date.now(), inventory: {}, ownedRoles: {} };
     store.data.users[userId] = u;
     scheduleFlush();
   } else {
@@ -107,6 +107,8 @@ function ensureUser(userId) {
     if (u.totalLost == null) u.totalLost = 0;
     if (u.lastFlipAt == null) u.lastFlipAt = null;
     if (u.lastBlackjackAt == null) u.lastBlackjackAt = null;
+    if (u.inventory == null) u.inventory = {};
+    if (u.ownedRoles == null) u.ownedRoles = {};
   }
   return u;
 }

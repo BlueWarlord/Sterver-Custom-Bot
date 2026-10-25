@@ -3,6 +3,7 @@ const store = require("../economy/store");
 const drops = require("../economy/drops");
 const logger = require("../utils/logger");
 const commands = require("../commands");
+const inventory = require("../economy/inventory");
 
 // Registers (bulk-overwrites) the slash commands for the configured guild.
 // Done on every startup so a separate `npm run deploy` step is no longer required.
@@ -29,6 +30,7 @@ module.exports = {
     if (!guild) { logger.error("guild not found"); process.exit(1); }
     await registerSlashCommands(guild);
     store.startBackupTimer();
+    inventory.startRoleExpiryTimer(client);
     drops.init(client);
     drops.verifyChannel(client);
   },

@@ -173,10 +173,16 @@ test("coinflip command: prefix parsing order-independence", async () => {
     const id = `px-${Math.random()}`;
     fund(id, 1000);
     const sent = [];
-    const message = { author: { id, toString: () => `<@${id}>` }, reply: async (c) => sent.push(typeof c === "string" ? c : c.content) };
+    const message = { author: { id, username: "tester", toString: () => `<@${id}>` }, reply: async (c) => sent.push(c) };
     await coinflipCmd.executePrefix(message, args);
     resetCooldown(id);
-    assert.ok(sent.some(s => typeof s === "string" && s.includes("flipped")), `${label}: expected flip result, got ${JSON.stringify(sent)}`);
+
+    const payload = sent.find(p => p && Array.isArray(p.embeds) && p.embeds.length === 1);
+    assert.ok(payload, `${label}: expected a result embed, got ${JSON.stringify(sent)}`);
+    assert.strictEqual(payload.content, undefined, `${label}: result message should contain only the embed`);
+
+    const buttons = payload.components[0].toJSON().components;
+    assert.deepStrictEqual(buttons.map(b => b.label), ["Heads", "Tails"], `${label}: play again should offer Heads or Tails`);
   }
 });
 

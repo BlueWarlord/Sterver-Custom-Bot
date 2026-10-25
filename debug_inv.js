@@ -1,0 +1,18 @@
+﻿const os = require('node:os');
+const path = require('node:path');
+const config = require('./config');
+config.storage.path = path.join(os.tmpdir(), 'sterbot-inv-debug-' + process.pid + '.json');
+const store = require('./src/economy/store');
+const inventory = require('./src/economy/inventory');
+store.load();
+const u = store.ensureUser('buyer');
+u.balance = 1000;
+store.update(function(){});
+const buyRes = inventory.buyItem('buyer','wooden_sword');
+console.log(JSON.stringify(buyRes));
+console.log(JSON.stringify(store.ensureUser('buyer').inventory));
+const giveRes = inventory.giveItem('buyer','receiver','wooden_sword',1);
+console.log(JSON.stringify(giveRes));
+console.log(JSON.stringify(store.ensureUser('buyer').inventory));
+console.log(JSON.stringify(store.ensureUser('receiver').inventory));
+store.stop();

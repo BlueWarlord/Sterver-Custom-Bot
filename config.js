@@ -100,5 +100,41 @@ module.exports = {
     timeoutMs: 60000,
   },
   leaderboard: { size: 10 },
+  inventory: {
+    // Buyable items
+    items: [
+      {
+        id: "wooden_sword",
+        name: "Wooden Sword",
+        description: "A basic wooden sword.",
+        price: 50,
+        sellPrice: 25,
+        type: "item",
+      },
+    ],
+    // Buyable roles
+    roles: [
+      {
+        id: "vip",
+        name: "VIP",
+        description: "VIP status role.",
+        price: 100000,
+        sellPrice: null,      // Roles cannot be sold if null
+        type: "role",
+        roleId: "1563638653685604536",
+        durationMs: null,     // null = permanent role
+      },
+      {
+        id: "temp_supporter",
+        name: "Temp Supporter",
+        description: "Temporary supporter role (1 hour).",
+        price: 500,
+        sellPrice: null,
+        type: "role",
+        roleId: "1563638719678910594",
+        durationMs: 60000,    // 60 seconds
+      },
+    ],
+  },
   storage: { path: "data/data.json", flushIntervalMs: 3000, backupsEnabled: true, backupIntervalMinutes: 60, backupsToKeep: 24 },
 };
