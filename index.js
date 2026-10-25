@@ -6,6 +6,7 @@ const store = require("./src/economy/store");
 const readyEvent = require("./src/events/ready");
 const messageCreateEvent = require("./src/events/messageCreate");
 const interactionCreateEvent = require("./src/events/interactionCreate");
+const guildMemberRemoveEvent = require("./src/events/guildMemberRemove");
 
 const errors = validate(config);
 if (errors.length) { errors.forEach(e => console.error("CONFIG ERROR:", e)); process.exit(1); }
@@ -15,10 +16,11 @@ if (!process.env.CLIENT_ID || !/^\d+$/.test(process.env.CLIENT_ID)) { console.er
 (async () => {
   await store.load();
   store.start();
-  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers] });
   client.once(Events.ClientReady, () => readyEvent.execute(client));
   client.on("messageCreate", (m) => messageCreateEvent.execute(m));
   client.on("interactionCreate", (i) => interactionCreateEvent.execute(i));
+  client.on("guildMemberRemove", (m) => guildMemberRemoveEvent.execute(m));
   const shutdown = require("./src/events/shutdown");
   const doShutdown = () => shutdown(client);
   process.on("SIGINT", doShutdown);

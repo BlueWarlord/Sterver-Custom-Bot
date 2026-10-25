@@ -81,8 +81,8 @@ module.exports = {
     ],
 
     // Drop message appearance
-    dropText: "A SterCoin drop appeared! Type `.pick` to claim it.",
-    imagePath: "./assets/drop.png",
+    dropText: "A SterCoin drop of {amount} appeared! Type `.pick` to claim it.",
+    imagePath: "./assests/drop.png",
     claimedText: "This drop has already been claimed.",
 
     // Optional direct image URL.

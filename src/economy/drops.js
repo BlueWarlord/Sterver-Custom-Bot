@@ -198,8 +198,8 @@ async function postDrop(channelId, messagesPerSecond, multiplier) {
     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     const content =
-      DROP_CONFIG.dropText ||
-      "A SterCoin drop appeared! Type `.pick` to claim it.";
+      DROP_CONFIG.dropText?.replace("{amount}", amount.toString()) ||
+      `A SterCoin drop of ${amount} appeared! Type \`.pick\` to claim it.`;
 
     const message = await channel.send({
       content,

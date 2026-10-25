@@ -2,7 +2,7 @@ const config = require("../../config");
 const activity = require("../economy/activity");
 const drops = require("../economy/drops");
 const commands = require("../commands");
-
+const { PermissionFlagsBits } = require("discord.js");
 module.exports = {
   name: "messageCreate",
 
