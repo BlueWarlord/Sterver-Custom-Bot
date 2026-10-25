@@ -4,7 +4,7 @@ const { formatAmount } = require("../utils/format");
 
 module.exports = {
   name: "sell",
-  aliases: ["sellitem"],
+  aliases: [],
   slash: new SlashCommandBuilder().setName("sell").setDescription("Sell an item")
     .addStringOption(o => o.setName("id").setDescription("Item ID").setRequired(true))
     .addIntegerOption(o => o.setName("quantity").setDescription("Quantity").setRequired(false).setMinValue(1)),

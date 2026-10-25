@@ -4,7 +4,7 @@ const { formatAmount } = require("../utils/format");
 
 module.exports = {
   name: "giveitem",
-  aliases: ["gitem", "transferitem"],
+  aliases: ["gitem"],
   slash: new SlashCommandBuilder().setName("giveitem").setDescription("Give an item to someone")
     .addUserOption(o => o.setName("user").setDescription("Recipient").setRequired(true))
     .addStringOption(o => o.setName("id").setDescription("Item ID").setRequired(true))

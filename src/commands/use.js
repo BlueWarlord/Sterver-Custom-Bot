@@ -4,7 +4,7 @@ const { formatAmount } = require("../utils/format");
 
 module.exports = {
   name: "use",
-  aliases: ["useitem"],
+  aliases: [],
   slash: new SlashCommandBuilder().setName("use").setDescription("Use an item")
     .addStringOption(o => o.setName("id").setDescription("Item ID").setRequired(true)),
   async executeSlash(interaction) {

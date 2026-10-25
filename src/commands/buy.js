@@ -47,7 +47,7 @@ function listCatalog() {
 
 module.exports = {
   name: "buy",
-  aliases: ["shop", "purchase"],
+  aliases: ["shop"],
   slash: new SlashCommandBuilder().setName("buy").setDescription("Buy an item or role")
     .addStringOption(o => o.setName("id").setDescription("Item or role ID").setRequired(false)),
   async executeSlash(interaction) {
