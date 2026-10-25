@@ -1,620 +1,413 @@
-const { EmbedBuilder } = require("discord.js");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const config = require("../../config");
 const wallet = require("./wallet");
 const logger = require("../utils/logger");
-const { randomInt, weightedPick } = require("../utils/random");
-const { randomIntervalMs } = require("../utils/time");
 
-// Active drops, indexed by their unique ID.
-const activeDrops = new Map();
-
-// channelId -> userId -> array of eligible message timestamps
-const messageActivity = new Map();
-
-// Per-channel scheduling state.
-const lastDropAt = new Map();
-const baselineIntervals = new Map();
-const pendingChannels = new Set();
+const drops = new Map();
+const channelActivity = new Map();
+const channelClocks = new Map();
 
 let clientRef = null;
 let tickHandle = null;
 let lastTickAt = 0;
 
-const DROP_WINDOW_MS = () => config.drops.densityWindowSeconds * 1000;
+const DROP_CONFIG = config.drops;
 
-function configuredChannelIds() {
-  return [...new Set(config.drops.channelIds)];
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-function isDropChannel(channelId) {
-  return configuredChannelIds().includes(channelId);
-}
+function weightedPick(table) {
+  const totalWeight = table.reduce((sum, entry) => sum + entry.weight, 0);
+  let roll = Math.random() * totalWeight;
 
-// --------------------------------------------------
-// Message activity and spam prevention
-// --------------------------------------------------
-
-function pruneActivity(channelId, now = Date.now()) {
-  const users = messageActivity.get(channelId);
-
-  if (!users) return 0;
-
-  const cutoff = now - DROP_WINDOW_MS();
-  let total = 0;
-
-  for (const [userId, timestamps] of users) {
-    const recent = timestamps.filter((timestamp) => timestamp > cutoff);
-
-    if (recent.length === 0) {
-      users.delete(userId);
-      continue;
-    }
-
-    users.set(userId, recent);
-    total += recent.length;
+  for (const entry of table) {
+    roll -= entry.weight;
+    if (roll < 0) return entry;
   }
 
-  if (users.size === 0) {
-    messageActivity.delete(channelId);
-    return 0;
-  }
-
-  return total;
+  return table[table.length - 1];
 }
 
-/**
- * Called for incoming messages.
- *
- * A user can contribute only a limited number of messages within
- * the configured rolling window. Commands do not contribute.
- */
+function randomTargetSeconds() {
+  return randomInt(
+    DROP_CONFIG.intervalMinMinutes * 60,
+    DROP_CONFIG.intervalMaxMinutes * 60
+  );
+}
+
+function getChannelIds() {
+  return Array.isArray(DROP_CONFIG.channelIds)
+    ? DROP_CONFIG.channelIds
+    : [];
+}
+
+function getRecentActivity(channelId, now = Date.now()) {
+  const windowMs = DROP_CONFIG.densityWindowSeconds * 1000;
+  const cutoff = now - windowMs;
+  const entries = channelActivity.get(channelId) || [];
+
+  const recent = entries.filter((entry) => entry.at >= cutoff);
+  channelActivity.set(channelId, recent);
+
+  // Limit how much one person can contribute to the activity rate.
+  const perUserCounts = new Map();
+  const allowed = [];
+
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const entry = recent[i];
+    const count = perUserCounts.get(entry.userId) || 0;
+
+    if (count >= DROP_CONFIG.maxMessagesPerUserPerWindow) continue;
+
+    perUserCounts.set(entry.userId, count + 1);
+    allowed.push(entry);
+  }
+
+  return allowed.length / DROP_CONFIG.densityWindowSeconds;
+}
+
+function activityMultiplier(messagesPerSecond) {
+  const threshold = DROP_CONFIG.minMessagesPerSecond;
+
+  if (messagesPerSecond < threshold) return 0;
+
+  const sensitivity = DROP_CONFIG.rateSensitivity;
+  const maxMultiplier = DROP_CONFIG.maxRateMultiplier;
+
+  return Math.min(
+    maxMultiplier,
+    Math.pow(messagesPerSecond / threshold, sensitivity)
+  );
+}
+
 function observeMessage(message) {
-  if (!config.drops.enabled) return;
-  if (!message.guild) return;
-  if (message.guild.id !== config.discord.guildId) return;
-  if (message.author.bot || message.webhookId || message.system) return;
-  if (!isDropChannel(message.channel.id)) return;
+  if (!DROP_CONFIG.enabled) return;
+  if (!message || !message.guild || message.author?.bot) return;
+  if (!getChannelIds().includes(message.channelId)) return;
 
-  const prefix = config.commands.prefix;
+  // Don't let claiming a drop itself count as chat activity.
+  const prefix = config.commands?.prefix || ".";
+  if (message.content?.trim().toLowerCase() === `${prefix}pick`) return;
 
-  // Prevent command spam, including repeated ".pick", from
-  // artificially increasing the drop probability.
-  if (message.content.startsWith(prefix)) return;
-
-  const channelId = message.channel.id;
-  const userId = message.author.id;
   const now = Date.now();
+  const entries = channelActivity.get(message.channelId) || [];
 
-  pruneActivity(channelId, now);
+  entries.push({
+    at: now,
+    userId: message.author.id,
+  });
 
-  if (!messageActivity.has(channelId)) {
-    messageActivity.set(channelId, new Map());
-  }
+  channelActivity.set(message.channelId, entries);
 
-  const users = messageActivity.get(channelId);
-
-  if (!users.has(userId)) {
-    users.set(userId, []);
-  }
-
-  const timestamps = users.get(userId);
-  const perUserLimit = config.drops.maxMessagesPerUserPerWindow;
-
-  if (timestamps.length >= perUserLimit) return;
-
-  timestamps.push(now);
+  // Keep the activity collection bounded to the configured window.
+  getRecentActivity(message.channelId, now);
 }
 
-/**
- * Returns the adjusted eligible message rate in messages/second.
- */
-function getMessageRate(channelId, now = Date.now()) {
-  const count = pruneActivity(channelId, now);
-  return count / config.drops.densityWindowSeconds;
+function getImageAttachment() {
+  const imagePath = DROP_CONFIG.imagePath;
+
+  if (typeof imagePath !== "string" || imagePath.trim() === "") {
+    return [];
+  }
+
+  const absolutePath = path.resolve(process.cwd(), imagePath);
+
+  if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
+    logger.warn("drop image not found; posting text only", {
+      imagePath: absolutePath,
+    });
+    return [];
+  }
+
+  return [{
+    attachment: absolutePath,
+    name: path.basename(absolutePath),
+  }];
 }
 
-// --------------------------------------------------
-// Probability model
-// --------------------------------------------------
+function scheduleDelete(drop, delaySeconds) {
+  const delay = Math.max(0, delaySeconds) * 1000;
 
-function getBaselineIntervalMs(channelId) {
-  if (!baselineIntervals.has(channelId)) {
-    baselineIntervals.set(
-      channelId,
-      randomIntervalMs(
-        config.drops.intervalMinMinutes,
-        config.drops.intervalMaxMinutes
-      )
-    );
-  }
+  setTimeout(async () => {
+    try {
+      const channel =
+        clientRef.channels.cache.get(drop.channelId) ||
+        await clientRef.channels.fetch(drop.channelId).catch(() => null);
 
-  return baselineIntervals.get(channelId);
-}
-
-/**
- * Probability of a drop during this scheduler tick.
- *
- * The baseline interval determines the underlying rate.
- * Activity above the configured threshold increases that rate.
- *
- * The exponential hazard model gives:
- *
- * P(drop in dt) = 1 - exp(-dt / interval * activityMultiplier)
- *
- * This is a probability per tick, not a guaranteed timer.
- */
-function getDropProbability(channelId, rate, elapsedSeconds) {
-  const threshold = config.drops.minMessagesPerSecond;
-
-  if (rate < threshold) return 0;
-
-  const relativeRate = rate / threshold;
-
-  const multiplier = Math.min(
-    Math.pow(relativeRate, config.drops.rateSensitivity),
-    config.drops.maxRateMultiplier
-  );
-
-  const intervalSeconds = getBaselineIntervalMs(channelId) / 1000;
-
-  return 1 - Math.exp(
-    -(elapsedSeconds / intervalSeconds) * multiplier
-  );
-}
-
-// --------------------------------------------------
-// Amount distribution
-// --------------------------------------------------
-
-function rollDropAmount() {
-  let table = config.drops.table;
-
-  if (!config.drops.allowNegativeAmounts) {
-    table = table.filter((entry) => entry.min >= 0);
-  }
-
-  if (table.length === 0) {
-    throw new Error(
-      "No usable drop amount entries. Check drops.table and allowNegativeAmounts."
-    );
-  }
-
-  const entry = weightedPick(table);
-  let amount = randomInt(entry.min, entry.max);
-
-  // Apply hard caps even if the distribution is misconfigured.
-  if (amount > 0) {
-    amount = Math.min(amount, config.drops.maxPositiveAmount);
-  } else if (amount < 0) {
-    amount = Math.max(amount, -config.drops.maxNegativeAmount);
-  }
-
-  return amount;
-}
-
-// --------------------------------------------------
-// Drop message helpers
-// --------------------------------------------------
-
-function makeEmbed(description) {
-  const embed = new EmbedBuilder()
-    .setTitle(config.drops.embedTitle)
-    .setDescription(description);
-
-  if (config.drops.imageUrl) {
-    embed.setImage(config.drops.imageUrl);
-  }
-
-  return embed;
-}
-
-function amountDescription(amount) {
-  if (amount > 0) {
-    return `**Reward:** +${amount} ${config.currency.plural}`;
-  }
-
-  if (amount < 0) {
-    return `**Penalty:** ${amount} ${config.currency.plural}`;
-  }
-
-  return "**Amount:** 0";
-}
-
-async function fetchDropMessage(drop) {
-  if (!clientRef) return null;
-
-  const channel =
-    clientRef.channels.cache.get(drop.channelId) ||
-    await clientRef.channels.fetch(drop.channelId).catch(() => null);
-
-  if (!channel || !channel.isTextBased() || !channel.messages) {
-    return null;
-  }
-
-  const message = await channel.messages
-    .fetch(drop.messageId)
-    .catch(() => null);
-
-  return message;
-}
-
-async function deleteDropMessage(drop) {
-  const message = await fetchDropMessage(drop);
-
-  if (message) {
-    await message.delete().catch((error) => {
-      logger.warn("drop message deletion failed", {
-        dropId: drop.id,
+      if (channel?.isTextBased() && channel.messages) {
+        await channel.messages.delete(drop.messageId).catch(() => {});
+      }
+    } catch (error) {
+      logger.warn("could not delete drop message", {
+        messageId: drop.messageId,
         error: error.message,
       });
-    });
-  }
-
-  activeDrops.delete(drop.id);
+    } finally {
+      drops.delete(drop.id);
+    }
+  }, delay);
 }
-
-function scheduleCleanup(drop, delaySeconds) {
-  if (drop.cleanupTimer) {
-    clearTimeout(drop.cleanupTimer);
-  }
-
-  drop.cleanupTimer = setTimeout(() => {
-    deleteDropMessage(drop).catch((error) => {
-      logger.error("drop cleanup failed", {
-        dropId: drop.id,
-        error: error.message,
-      });
-      activeDrops.delete(drop.id);
-    });
-  }, delaySeconds * 1000);
-}
-
-// --------------------------------------------------
-// Expiration
-// --------------------------------------------------
 
 async function expireDrop(drop) {
   if (drop.claimed || drop.expired) return;
 
   drop.expired = true;
 
-  if (drop.expiryTimer) {
-    clearTimeout(drop.expiryTimer);
-    drop.expiryTimer = null;
+  try {
+    const channel =
+      clientRef.channels.cache.get(drop.channelId) ||
+      await clientRef.channels.fetch(drop.channelId).catch(() => null);
+
+    if (channel?.isTextBased() && channel.messages) {
+      const message = await channel.messages
+        .fetch(drop.messageId)
+        .catch(() => null);
+
+      if (message) {
+        await message.edit({
+          content: DROP_CONFIG.expiredText || "This drop has expired.",
+        }).catch(() => {});
+      }
+    }
+  } catch (error) {
+    logger.warn("could not update expired drop", {
+      messageId: drop.messageId,
+      error: error.message,
+    });
   }
 
-  const message = await fetchDropMessage(drop);
-
-  if (message) {
-    await message.edit({
-      embeds: [makeEmbed(config.drops.expiredText)],
-      components: [],
-    }).catch(() => {});
-  }
-
-  scheduleCleanup(drop, config.drops.deleteAfterExpirySeconds);
+  scheduleDelete(drop, DROP_CONFIG.deleteAfterExpirySeconds);
 }
 
-// --------------------------------------------------
-// Posting drops
-// --------------------------------------------------
-
-async function postDrop(channelId) {
+async function postDrop(channelId, messagesPerSecond, multiplier) {
   try {
-    if (!clientRef) return;
-
     const channel =
       clientRef.channels.cache.get(channelId) ||
       await clientRef.channels.fetch(channelId).catch(() => null);
 
     if (!channel || !channel.isTextBased() || !channel.send) {
-      logger.error("drop channel unavailable", { channelId });
+      logger.warn("drop channel unavailable", { channelId });
       return;
     }
 
-    const amount = rollDropAmount();
-    const id = `${Date.now().toString(36)}-${randomInt(100000, 999999)}`;
-    const expiresAt =
-      Date.now() + config.drops.claimWindowMinutes * 60 * 1000;
+    const entry = weightedPick(DROP_CONFIG.table);
+    const amount = randomInt(entry.min, entry.max);
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-    const description = [
-      config.drops.embedDescription,
-      "",
-      amountDescription(amount),
-      "",
-      `Type \`${config.commands.prefix}pick\` in this channel to claim it.`,
-    ].join("\n");
+    const content =
+      DROP_CONFIG.dropText ||
+      "A SterCoin drop appeared! Type `.pick` to claim it.";
 
     const message = await channel.send({
-      embeds: [makeEmbed(description)],
-      components: [],
+      content,
+      files: getImageAttachment(),
+      allowedMentions: { parse: [] },
     });
 
     const drop = {
       id,
-      amount,
       channelId,
       messageId: message.id,
+      amount,
       createdAt: Date.now(),
-      expiresAt,
+      expiresAt: Date.now() + DROP_CONFIG.claimWindowMinutes * 60_000,
       claimed: false,
       expired: false,
-      expiryTimer: null,
-      cleanupTimer: null,
     };
 
-    drop.expiryTimer = setTimeout(() => {
-      expireDrop(drop).catch((error) => {
-        logger.error("drop expiration failed", {
-          dropId: drop.id,
-          error: error.message,
-        });
-      });
-    }, config.drops.claimWindowMinutes * 60 * 1000);
+    drops.set(id, drop);
 
-    activeDrops.set(id, drop);
+    drop.expiryTimer = setTimeout(
+      () => expireDrop(drop),
+      DROP_CONFIG.claimWindowMinutes * 60_000
+    );
 
-    logger.info("drop_posted", {
-      dropId: id,
+    logger.info("drop posted", {
       channelId,
       amount,
-      expiresAt,
+      messagesPerSecond: Number(messagesPerSecond.toFixed(3)),
+      multiplier: Number(multiplier.toFixed(2)),
     });
   } catch (error) {
-    logger.error("drop post failed", {
-      channelId,
-      error: error.message,
-    });
-  } finally {
-    pendingChannels.delete(channelId);
-
-    // Choose a fresh baseline interval for the next drop attempt.
-    baselineIntervals.set(
-      channelId,
-      randomIntervalMs(
-        config.drops.intervalMinMinutes,
-        config.drops.intervalMaxMinutes
-      )
-    );
+    logger.error("drop post failed", { error: error.message });
   }
 }
 
-function hasUnclaimedDrop(channelId) {
-  for (const drop of activeDrops.values()) {
-    if (
-      drop.channelId === channelId &&
-      !drop.claimed &&
-      !drop.expired
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-// --------------------------------------------------
-// Scheduler
-// --------------------------------------------------
-
-function tick() {
-  if (!config.drops.enabled || !clientRef) return;
+async function pick(message) {
+  if (!message?.guild || message.author?.bot) return;
 
   const now = Date.now();
 
-  // Limit elapsed time so a delayed event loop does not cause
-  // an enormous artificial probability spike.
-  const maxElapsed = config.drops.tickSeconds * 3;
-
-  const elapsedSeconds = Math.min(
-    Math.max((now - lastTickAt) / 1000, 0),
-    maxElapsed
-  );
-
-  lastTickAt = now;
-
-  for (const channelId of configuredChannelIds()) {
-    if (pendingChannels.has(channelId)) continue;
-    if (hasUnclaimedDrop(channelId)) continue;
-
-    const previousDropAt = lastDropAt.get(channelId) || 0;
-    const minGapMs = config.drops.minGapMinutes * 60 * 1000;
-
-    if (now - previousDropAt < minGapMs) continue;
-
-    const rate = getMessageRate(channelId, now);
-
-    // No activity threshold, no drop probability.
-    if (rate < config.drops.minMessagesPerSecond) continue;
-
-    const probability = getDropProbability(
-      channelId,
-      rate,
-      elapsedSeconds
-    );
-
-    if (Math.random() >= probability) continue;
-
-    // Reserve this channel before starting the asynchronous send.
-    // This prevents two ticks from posting duplicate drops.
-    pendingChannels.add(channelId);
-    lastDropAt.set(channelId, now);
-
-    postDrop(channelId);
-  }
-}
-
-// --------------------------------------------------
-// Picking up drops with ".pick"
-// --------------------------------------------------
-
-async function pick(message) {
-  if (!config.drops.enabled) return;
-
-  if (!isDropChannel(message.channel.id)) {
-    await message.reply({
-      content: "Drops cannot be picked up in this channel.",
-      allowedMentions: { repliedUser: false },
-    });
-    return;
-  }
-
-  // A channel can have only one unclaimed drop at a time.
-  const drop = [...activeDrops.values()].find((candidate) =>
-    candidate.channelId === message.channel.id &&
-    !candidate.claimed &&
-    !candidate.expired
+  // Find the first available drop in the channel.
+  const drop = [...drops.values()].find(
+    (candidate) =>
+      candidate.channelId === message.channelId &&
+      !candidate.claimed &&
+      !candidate.expired &&
+      now < candidate.expiresAt
   );
 
   if (!drop) {
-    await message.reply({
-      content: "There is no active drop to pick up in this channel.",
-      allowedMentions: { repliedUser: false },
-    });
+    await message.reply("There isn't an available drop in this channel.").catch(() => {});
     return;
   }
 
-  if (Date.now() >= drop.expiresAt) {
-    await expireDrop(drop);
-
-    await message.reply({
-      content: config.drops.expiredText,
-      allowedMentions: { repliedUser: false },
-    });
-    return;
-  }
-
-  // Set the claim flag before any await, preventing simultaneous
-  // ".pick" messages from claiming the same drop.
+  // Mark it claimed before any asynchronous work, preventing double claims.
   drop.claimed = true;
+  if (drop.expiryTimer) clearTimeout(drop.expiryTimer);
 
-  if (drop.expiryTimer) {
-    clearTimeout(drop.expiryTimer);
-    drop.expiryTimer = null;
-  }
-
-  const userId = message.author.id;
-  let resultMessage;
+  let actualChange = 0;
+  let resultText = "";
 
   if (drop.amount > 0) {
-    const result = wallet.credit(userId, drop.amount, "drop");
+    const result = wallet.credit(message.author.id, drop.amount, "drop");
 
     if (!result.ok) {
       drop.claimed = false;
-
-      await message.reply({
-        content: "The drop could not be claimed. Please try again.",
-        allowedMentions: { repliedUser: false },
-      });
+      await message.reply("I couldn't credit your wallet. Please try again.").catch(() => {});
       return;
     }
 
-    resultMessage =
-      `${message.author} picked up the drop and received ` +
-      `**${drop.amount} ${config.currency.plural}**!`;
-  } else if (drop.amount < 0) {
-    // Penalties cannot push a balance below zero.
-    const balance = wallet.getBalance(userId);
-    const loss = Math.min(Math.abs(drop.amount), balance);
+    actualChange = drop.amount;
+    resultText = `You claimed **${actualChange} SterCoins**!`;
+  } else {
+    // A negative drop can take only what the user currently has.
+    // The balance can never go below zero.
+    const balance = Math.max(0, wallet.getBalance(message.author.id));
+    const requestedLoss = Math.abs(drop.amount);
+    const actualLoss = Math.min(balance, requestedLoss);
 
-    if (loss > 0) {
-      const result = wallet.debit(userId, loss, "drop_penalty");
+    if (actualLoss > 0) {
+      const result = wallet.debit(message.author.id, actualLoss, "drop");
 
       if (!result.ok) {
         drop.claimed = false;
-
-        await message.reply({
-          content: "The drop could not be claimed. Please try again.",
-          allowedMentions: { repliedUser: false },
-        });
+        await message.reply("I couldn't update your wallet. Please try again.").catch(() => {});
         return;
       }
     }
 
-    resultMessage = loss > 0
-      ? `${message.author} picked up the drop and lost ` +
-        `**${loss} ${config.currency.plural}**.`
-      : `${message.author} picked up a penalty drop, but had no ` +
-        `${config.currency.plural} to lose.`;
-  } else {
-    resultMessage = `${message.author} picked up a drop worth 0.`;
+    actualChange = -actualLoss;
+    resultText = actualLoss > 0
+      ? `You claimed the drop and lost **${actualLoss} SterCoins**.`
+      : "You claimed the negative drop, but you had no SterCoins to lose.";
   }
 
-  const dropMessage = await fetchDropMessage(drop);
-
-  if (dropMessage) {
-    await dropMessage.edit({
-      embeds: [
-        makeEmbed(
-          `Claimed by ${message.author}.\n\n${amountDescription(drop.amount)}`
-        ),
-      ],
-      components: [],
-    }).catch(() => {});
-  }
-
-  logger.info("drop_claimed", {
+  logger.info("drop claimed", {
     dropId: drop.id,
-    userId,
-    amount: drop.amount,
+    userId: message.author.id,
+    rolledAmount: drop.amount,
+    actualChange,
   });
 
-  await message.reply({
-    content: resultMessage,
-    allowedMentions: { repliedUser: false },
-  });
+  try {
+    const channel =
+      clientRef.channels.cache.get(drop.channelId) ||
+      await clientRef.channels.fetch(drop.channelId).catch(() => null);
 
-  scheduleCleanup(drop, config.drops.deleteAfterClaimSeconds);
+    if (channel?.isTextBased() && channel.messages) {
+      const dropMessage = await channel.messages
+        .fetch(drop.messageId)
+        .catch(() => null);
+
+      if (dropMessage) {
+        await dropMessage.edit({
+          content: `Drop claimed by <@${message.author.id}>!`,
+          allowedMentions: { parse: [] },
+        }).catch(() => {});
+      }
+    }
+  } catch (_) {}
+
+  await message.reply(resultText).catch(() => {});
+  scheduleDelete(drop, DROP_CONFIG.deleteAfterClaimSeconds);
 }
 
-// --------------------------------------------------
-// Initialization
-// --------------------------------------------------
+function tick() {
+  const now = Date.now();
+  const elapsedSeconds = Math.min(
+    Math.max(0, (now - lastTickAt) / 1000),
+    DROP_CONFIG.tickSeconds * 3
+  );
+
+  lastTickAt = now;
+
+  for (const channelId of getChannelIds()) {
+    let clock = channelClocks.get(channelId);
+
+    if (!clock) {
+      clock = {
+        effectiveSeconds: 0,
+        targetSeconds: randomTargetSeconds(),
+        lastDropAt: 0,
+        posting: false,
+      };
+      channelClocks.set(channelId, clock);
+    }
+
+    if (clock.posting) continue;
+
+    const messagesPerSecond = getRecentActivity(channelId, now);
+    const multiplier = activityMultiplier(messagesPerSecond);
+
+    // Quiet channels do not progress toward a drop.
+    if (multiplier === 0) continue;
+
+    clock.effectiveSeconds += elapsedSeconds * multiplier;
+
+    if (clock.effectiveSeconds < clock.targetSeconds) continue;
+
+    const minimumGapMs = DROP_CONFIG.minGapMinutes * 60_000;
+    if (now - clock.lastDropAt < minimumGapMs) continue;
+
+    clock.effectiveSeconds = 0;
+    clock.targetSeconds = randomTargetSeconds();
+    clock.lastDropAt = now;
+    clock.posting = true;
+
+    postDrop(channelId, messagesPerSecond, multiplier)
+      .finally(() => {
+        clock.posting = false;
+      });
+  }
+}
 
 function init(client) {
+  if (tickHandle) clearInterval(tickHandle);
+
   clientRef = client;
 
-  if (tickHandle) {
-    clearInterval(tickHandle);
-    tickHandle = null;
-  }
-
-  if (!config.drops.enabled) {
-    logger.info("random drops disabled");
+  if (!DROP_CONFIG.enabled) {
+    logger.info("random drops are disabled");
     return;
   }
 
-  lastTickAt = Date.now();
+  const now = Date.now();
 
-  for (const channelId of configuredChannelIds()) {
-    baselineIntervals.set(
-      channelId,
-      randomIntervalMs(
-        config.drops.intervalMinMinutes,
-        config.drops.intervalMaxMinutes
-      )
-    );
+  for (const channelId of getChannelIds()) {
+    channelClocks.set(channelId, {
+      effectiveSeconds: 0,
+      targetSeconds: randomTargetSeconds(),
+      lastDropAt: now,
+      posting: false,
+    });
   }
 
-  tickHandle = setInterval(tick, config.drops.tickSeconds * 1000);
+  lastTickAt = now;
+  tickHandle = setInterval(tick, DROP_CONFIG.tickSeconds * 1000);
 
-  logger.info("random drop scheduler started", {
-    channels: configuredChannelIds().length,
-    tickSeconds: config.drops.tickSeconds,
+  logger.info("random drops initialized", {
+    channels: getChannelIds().length,
   });
 }
 
 function verifyChannel(client) {
-  for (const channelId of configuredChannelIds()) {
-    const channel = client.channels.cache.get(channelId);
-
-    if (!channel) {
+  for (const channelId of getChannelIds()) {
+    if (!client.channels.cache.has(channelId)) {
       logger.warn("drop channel not cached; it will be fetched when needed", {
-        channelId,
-      });
-    } else if (!channel.isTextBased() || !channel.send) {
-      logger.error("configured drop channel is not text-based", {
         channelId,
       });
     }

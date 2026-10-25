@@ -81,9 +81,8 @@ module.exports = {
     ],
 
     // Drop message appearance
-    embedTitle: "A SterCoin drop appeared!",
-    embedDescription: "Type `.pick` to claim this drop.",
-    expiredText: "This drop has expired.",
+    dropText: "A SterCoin drop appeared! Type `.pick` to claim it.",
+    imagePath: "./assets/drop.png",
     claimedText: "This drop has already been claimed.",
 
     // Optional direct image URL.
