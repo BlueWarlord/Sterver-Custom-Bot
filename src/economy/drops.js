@@ -236,6 +236,68 @@ async function postDrop(channelId, messagesPerSecond, multiplier) {
   }
 }
 
+async function triggerDrop(channelId, tableIndex = null) {
+  try {
+    const channel =
+      clientRef.channels.cache.get(channelId) ||
+      await clientRef.channels.fetch(channelId).catch(() => null);
+
+    if (!channel || !channel.isTextBased() || !channel.send) {
+      logger.warn("drop channel unavailable", { channelId });
+      return { success: false, error: "Channel unavailable" };
+    }
+
+    let entry;
+    if (tableIndex !== null && Number.isInteger(tableIndex) && tableIndex >= 0 && tableIndex < DROP_CONFIG.table.length) {
+      entry = DROP_CONFIG.table[tableIndex];
+    } else {
+      entry = weightedPick(DROP_CONFIG.table);
+    }
+
+    const amount = randomInt(entry.min, entry.max);
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const content =
+      DROP_CONFIG.dropText?.replace("{amount}", amount.toString()) ||
+      `A SterCoin drop of ${amount} appeared! Type \`.pick\` to claim it.`;
+
+    const message = await channel.send({
+      content,
+      files: getImageAttachment(),
+      allowedMentions: { parse: [] },
+    });
+
+    const drop = {
+      id,
+      channelId,
+      messageId: message.id,
+      amount,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + DROP_CONFIG.claimWindowMinutes * 60_000,
+      claimed: false,
+      expired: false,
+    };
+
+    drops.set(id, drop);
+
+    drop.expiryTimer = setTimeout(
+      () => expireDrop(drop),
+      DROP_CONFIG.claimWindowMinutes * 60_000
+    );
+
+    logger.info("drop manually triggered", {
+      channelId,
+      amount,
+      tableIndex: tableIndex ?? "random",
+    });
+
+    return { success: true, drop };
+  } catch (error) {
+    logger.error("manual drop trigger failed", { error: error.message });
+    return { success: false, error: error.message };
+  }
+}
+
 async function pick(message) {
   if (!message?.guild || message.author?.bot) return;
 
@@ -419,4 +481,5 @@ module.exports = {
   verifyChannel,
   observeMessage,
   pick,
+  triggerDrop,
 };

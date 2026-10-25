@@ -11,4 +11,5 @@ const inventory = require("./inventory");
 const use = require("./use");
 const sell = require("./sell");
 const giveitem = require("./giveitem");
-module.exports = [balance, coinflip, blackjack, daily, give, leaderboard, help, ping, buy, inventory, use, sell, giveitem];
+const drop = require("./drop");
+module.exports = [balance, coinflip, blackjack, daily, give, leaderboard, help, ping, buy, inventory, use, sell, giveitem, drop];

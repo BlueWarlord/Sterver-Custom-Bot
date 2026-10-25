@@ -88,6 +88,10 @@ module.exports = {
     // Optional direct image URL.
     // Leave empty to disable the image.
     imageUrl: "",
+
+    // Role ID that can manually trigger drops via command.
+    // Leave empty or undefined to disable manual triggers.
+    manualTriggerRoleId: "",
   },
   gift: { enabled: true, minAmount: 1, maxAmount: null, allowSelf: false, allowBots: false },
   gambling: { enabled: true, minBet: 1, maxBet: 1000, cooldownSeconds: 7 },
