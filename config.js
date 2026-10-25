@@ -1,223 +1,140 @@
-/**
- * Sterbot configuration
- * 
- * This file controls Discord IDs, economy, gambling, drops, inventory, storage, and more.
- * Edit values to fit your server. IDs are Discord snowflakes (strings).
- */
-
-// Discord
-const discord = {
-  guildId: "1563216575652433993",
-};
-
-// Channels
-const channels = {
-  generalChatId: "1563789802401173534",
-};
-
-// Currency display
-const currency = {
-  name: "SterCoin",
-  plural: "SterCoins",
-  emoji: "🪙",
-  thousandsSeparator: ",",
-};
-
-// Command settings
-const commands = {
-  prefix: ".", // Prefix for legacy/message commands
-  // If empty, commands are allowed in any channel. Otherwise restricted to these IDs.
-  allowedChannelIds: ["1563789802401173534"],
-};
-
-// Economy
-const economy = {
-  startingBalance: 0,
-};
-
-// Activity rewards (passive earning)
-const activity = {
-  enabled: true,
-  cooldownSeconds: 300, // Min seconds between activity rewards per user
-  amountMin: 1,
-  amountMax: 3,
-  ignoredChannelIds: [], // Channels excluded from activity rewards
-};
-
-// Daily rewards
-const daily = {
-  enabled: true,
-  amountMin: 20,
-  amountMax: 50,
-  cooldownHours: 24,
-};
-
-// Coin drops
-const drops = {
-  // Master switch
-  enabled: true,
-
-  // Channels that can spawn drops (must be valid channel IDs)
-  channelIds: [
-    "1563789802401173534",
-    // "ANOTHER_CHANNEL_ID",
-    // "THIRD_CHANNEL_ID",
-  ],
-
-  // Drop interval range (baseline) - each channel picks independently
-  intervalMinMinutes: 3,
-  intervalMaxMinutes: 25,
-
-  // Minimum real-time gap between drops in the same channel
-  minGapMinutes: 2,
-
-  // How often the scheduler checks for drop opportunities
-  tickSeconds: 5,
-
-  // Activity measurement (rolling window)
-  densityWindowSeconds: 60,
-  // Minimum adjusted message rate required to allow drops (messages/sec)
-  minMessagesPerSecond: 0.10, // ~6 messages/minute
-  // Max messages counted per user in the rolling window (prevents spam domination)
-  maxMessagesPerUserPerWindow: 3,
-  // Drop probability increases more sharply above threshold with higher sensitivity
-  rateSensitivity: 1.5,
-  // Cap on rate multiplier to avoid runaway probability
-  maxRateMultiplier: 5,
-
-  // Claim window
-  claimWindowMinutes: 10,
-
-  // Cleanup delays (seconds). 0 = delete immediately
-  deleteAfterExpirySeconds: 10,
-  deleteAfterClaimSeconds: 5,
-
-  // Negative drops
-  allowNegativeAmounts: true,
-  maxPositiveAmount: 100,
-  maxNegativeAmount: 25,
-
-  // Weighted drop amounts
-  // weight: relative probability; min/max define range
-  // Negative ranges only used if allowNegativeAmounts is true
-  table: [
-    { weight: 60, min: 5, max: 15 },      // Common small
-    { weight: 25, min: 16, max: 40 },     // Uncommon
-    { weight: 10, min: 41, max: 100 },    // Rare
-    { weight: 5, min: -25, max: -5 },     // Rare negative
-  ],
-
-  // Drop messages
-  embedTitle: "A SterCoin drop appeared!",
-  embedDescription: "Type `.pick` to claim this drop.",
-  expiredText: "This drop has expired.",
-  claimedText: "This drop has already been claimed.",
-
-  // Optional image URL (leave empty to disable)
-  imageUrl: "",
-};
-
-// Gifts
-const gift = {
-  enabled: true,
-  minAmount: 1,
-  maxAmount: null, // null = no upper limit
-  allowSelf: false,
-  allowBots: false,
-};
-
-// Coinflip
-
-// Gambling (general)
-const gambling = {
-  enabled: true,
-  minBet: 1,
-  maxBet: 1000,
-  cooldownSeconds: 3,
-};
-
-const coinflip = {
-  minBet: 1,
-  maxBet: 1000,
-  cooldownSeconds: 3,
-};
-
-// Blackjack
-const blackjack = {
-  minBet: 1,
-  maxBet: 1000,
-  cooldownSeconds: 3,
-  blackjackPayout: 1.5,      // Payout multiplier for natural blackjack (1.5 = 3:2)
-  dealerHitsSoft17: false,   // If true, dealer hits on soft 17 (A-6)
-  timeoutMs: 60000,          // Auto-stand timeout for active games (ms)
-};
-
-// Leaderboard
-const leaderboard = {
-  size: 10,
-};
-
-// Inventory & Store
-const inventory = {
-  // Buyable items
-  items: [
-    {
-      id: "wooden_sword",
-      name: "Wooden Sword",
-      description: "A basic wooden sword.",
-      price: 50,
-      sellPrice: 25,
-      type: "item",
-    },
-  ],
-  // Buyable roles
-  roles: [
-    {
-      id: "vip",
-      name: "VIP",
-      description: "VIP status role.",
-      price: 100000,
-      sellPrice: null,      // Roles cannot be sold if null
-      type: "role",
-      roleId: "1563638653685604536",
-      durationMs: null,     // null = permanent role
-    },
-    {
-      id: "temp_supporter",
-      name: "Temp Supporter",
-      description: "Temporary supporter role (1 hour).",
-      price: 500,
-      sellPrice: null,
-      type: "role",
-      roleId: "1563638719678910594",
-      durationMs: 60000,    // 60 seconds
-    },
-  ],
-};
-
-// Storage
-const storage = {
-  path: "data/data.json",
-  flushIntervalMs: 3000,      // How often to write changes to disk
-  backupsEnabled: true,
-  backupIntervalMinutes: 60,  // Create backup every hour
-  backupsToKeep: 24,          // Keep last 24 backups
-};
-
 module.exports = {
-  discord,
-  channels,
-  currency,
-  commands,
-  economy,
-  activity,
-  daily,
-  drops,
-  gift,
-  gambling,
-  coinflip,
-  blackjack,
-  leaderboard,
-  inventory,
-  storage,
+  discord: { guildId: "1563216575652433993" },
+  channels: { generalChatId: "1563216576378052620" },
+  currency: { name: "SterCoin", plural: "SterCoins", emoji: "🪙", thousandsSeparator: "," },
+  commands: { prefix: ".", allowedChannelIds: ["1563239663995723897"] },
+  economy: { startingBalance: 0 },
+  activity: { enabled: true, cooldownSeconds: 300, amountMin: 1, amountMax: 3, ignoredChannelIds: [] },
+  daily: { enabled: true, amountMin: 20, amountMax: 50, cooldownHours: 24 },
+  drops: {
+    // Master switch
+    enabled: true,
+
+    // Put every channel that can host drops here.
+    // These must be channel IDs from your configured Discord server.
+    channelIds: [
+      "1563216576378052620",
+      // "ANOTHER_CHANNEL_ID",
+      // "THIRD_CHANNEL_ID",
+    ],
+
+    // Baseline timing model
+    // Each channel independently chooses a baseline interval from this range.
+    // These are probability parameters, not guaranteed spawn times.
+    intervalMinMinutes: 1,
+    intervalMaxMinutes: 10,
+
+    // Minimum real-time gap between drops in the same channel.
+    minGapMinutes: 1,
+
+    // How often the scheduler checks activity and drop probability.
+    tickSeconds: 5,
+
+    // Activity measurement
+    // Messages are counted over a rolling window.
+    densityWindowSeconds: 60,
+
+    // The channel must meet this adjusted rate before a drop can occur.
+    // 0.10 messages/second = 6 eligible messages per 60 seconds.
+    minMessagesPerSecond: 0.10,
+
+    // A single user can contribute at most this many messages
+    // to the rolling activity window.
+    maxMessagesPerUserPerWindow: 5,
+
+    // Higher values make drop probability increase more sharply
+    // as the message rate rises above the threshold.
+    rateSensitivity: 1.5,
+
+    // Prevent exceptionally busy channels from multiplying the
+    // baseline drop probability without limit.
+    maxRateMultiplier: 5,
+
+    // How long a drop remains claimable.
+    claimWindowMinutes: 5,
+
+    // Message cleanup delays, in seconds.
+    // 0 means immediate deletion.
+    deleteAfterExpirySeconds: 10,
+    deleteAfterClaimSeconds: 5,
+
+    // Negative drops can deduct coins from whoever picks them.
+    allowNegativeAmounts: true,
+
+    // Absolute limits for a single drop.
+    maxPositiveAmount: 100,
+    maxNegativeAmount: 25,
+
+    // Weighted amount distribution.
+    // Each entry has:
+    //   weight = relative probability
+    //   min    = smallest possible amount
+    //   max    = largest possible amount
+    //
+    // Negative entries are ignored when allowNegativeAmounts is false.
+    // Keep each range entirely positive or entirely negative.
+    table: [
+      { weight: 60, min: 5, max: 15 },
+      { weight: 25, min: 16, max: 40 },
+      { weight: 10, min: 41, max: 100 },
+      { weight: 5, min: -25, max: -5 },
+    ],
+
+    // Drop message appearance
+    dropText: "A SterCoin drop of {amount} appeared! Type `.pick` to claim it.",
+    imagePath: "./assests/drop.png",
+    claimedText: "This drop has already been claimed.",
+
+    // Optional direct image URL.
+    // Leave empty to disable the image.
+    imageUrl: "",
+  },
+  gift: { enabled: true, minAmount: 1, maxAmount: null, allowSelf: false, allowBots: false },
+  gambling: { enabled: true, minBet: 1, maxBet: 1000, cooldownSeconds: 7 },
+  blackjack: {
+    minBet: 1,
+    maxBet: 1000,
+    cooldownSeconds: 7,
+    blackjackPayout: 1.5,
+    dealerHitsSoft17: false,
+    timeoutMs: 60000,
+  },
+  leaderboard: { size: 10 },
+  inventory: {
+    // Buyable items
+    items: [
+      {
+        id: "wooden_sword",
+        name: "Wooden Sword",
+        description: "A basic wooden sword.",
+        price: 50,
+        sellPrice: 25,
+        type: "item",
+      },
+    ],
+    // Buyable roles
+    roles: [
+      {
+        id: "vip",
+        name: "VIP",
+        description: "VIP status role.",
+        price: 100000,
+        sellPrice: null,      // Roles cannot be sold if null
+        type: "role",
+        roleId: "1563638653685604536",
+        durationMs: null,     // null = permanent role
+      },
+      {
+        id: "temp_supporter",
+        name: "Temp Supporter",
+        description: "Temporary supporter role (1 hour).",
+        price: 500,
+        sellPrice: null,
+        type: "role",
+        roleId: "1563638719678910594",
+        durationMs: 60000,    // 60 seconds
+      },
+    ],
+  },
+  storage: { path: "data/data.json", flushIntervalMs: 3000, backupsEnabled: true, backupIntervalMinutes: 60, backupsToKeep: 24 },
 };
