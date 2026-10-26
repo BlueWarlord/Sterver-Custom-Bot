@@ -1,13 +1,15 @@
 const assert = require("node:assert");
 const { test } = require("node:test");
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
 const config = require("./config");
-config.storage.path = path.join(os.tmpdir(), `sterbot-test-${process.pid}-${Date.now()}.json`);
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sterbot-coinflip-test-"));
+config.storage.path = path.join(tempDir, "data.json");
 
 const store = require("./src/economy/store");
-store.load();
+const loading = store.load();
 
 const { play } = require("./src/economy/games/coinflip");
 const coinflipCmd = require("./src/commands/coinflip");
@@ -24,65 +26,92 @@ function resetCooldown(userId) {
   if (u) u.lastFlipAt = null;
 }
 
-test("coinflip play: win path", async () => {
-  const orig = Math.random;
-  Math.random = () => 0;
+test("coinflip play: win path applies the configured house edge", async () => {
+  const edge = config.gambling.houseEdge;
+  const payoutMultiplier = config.gambling.coinflipPayout;
+  const expectedPayout = Math.floor(100 * payoutMultiplier * (1 - edge));
+  const expectedProfit = expectedPayout - 100;
+
+  fund("win-user", 1000);
+  const res = play("win-user", 100, "Heads", { rng: () => 0 });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.won, true);
+  assert.strictEqual(res.result, "Heads");
+  assert.strictEqual(res.guess, "Heads");
+  assert.strictEqual(res.bet, 100);
+  assert.strictEqual(res.payout, expectedPayout);
+  assert.strictEqual(res.profit, expectedProfit);
+  assert.strictEqual(res.houseEdge, edge);
+  assert.strictEqual(res.balance, 1000 + expectedProfit);
+  assert.strictEqual(res.totalWagered, 100);
+  assert.strictEqual(res.totalWon, Math.max(0, expectedProfit));
+  assert.strictEqual(res.totalLost, Math.max(0, -expectedProfit));
+});
+
+test("coinflip play: 5% house edge returns 1.9x on a win", async () => {
+  const originalEdge = config.gambling.houseEdge;
+  const originalPayout = config.gambling.coinflipPayout;
   try {
-    fund("win-user", 1000);
-    const res = play("win-user", 100, "Heads");
-    assert.strictEqual(res.ok, true);
-    assert.strictEqual(res.won, true);
-    assert.strictEqual(res.result, "Heads");
-    assert.strictEqual(res.guess, "Heads");
-    assert.strictEqual(res.bet, 100);
-    assert.strictEqual(res.profit, 200);
-    assert.strictEqual(res.balance, 1200);
-    assert.strictEqual(res.totalWagered, 100);
-    assert.strictEqual(res.totalWon, 200);
-    assert.strictEqual(res.totalLost, 0);
+    config.gambling.houseEdge = 0.05;
+    config.gambling.coinflipPayout = 2;
+    fund("edge-user", 1000);
+    const res = play("edge-user", 100, "Heads", { rng: () => 0 });
+    assert.strictEqual(res.payout, 190);
+    assert.strictEqual(res.profit, 90);
+    assert.strictEqual(res.balance, 1090);
+    assert.strictEqual(res.houseEdge, 0.05);
   } finally {
-    Math.random = orig;
+    config.gambling.houseEdge = originalEdge;
+    config.gambling.coinflipPayout = originalPayout;
+  }
+});
+
+test("coinflip play: fractional payouts round down to whole coins", async () => {
+  const originalEdge = config.gambling.houseEdge;
+  const originalPayout = config.gambling.coinflipPayout;
+  try {
+    config.gambling.houseEdge = 0.05;
+    config.gambling.coinflipPayout = 2;
+    fund("rounding-user", 1000);
+    const res = play("rounding-user", 25, "Heads", { rng: () => 0 });
+    // 25 * 2 * 0.95 = 47.5, which must become 47 whole coins.
+    assert.strictEqual(res.payout, 47);
+    assert.strictEqual(res.profit, 22);
+    assert.strictEqual(res.balance, 1022);
+    assert.ok(Number.isSafeInteger(res.payout));
+    assert.ok(Number.isSafeInteger(res.profit));
+    assert.ok(Number.isSafeInteger(res.balance));
+  } finally {
+    config.gambling.houseEdge = originalEdge;
+    config.gambling.coinflipPayout = originalPayout;
   }
 });
 
 test("coinflip play: loss path", async () => {
-  const orig = Math.random;
-  Math.random = () => 1;
-  try {
-    fund("loss-user", 1000);
-    const res = play("loss-user", 100, "Heads");
-    assert.strictEqual(res.ok, true);
-    assert.strictEqual(res.won, false);
-    assert.strictEqual(res.result, "Tails");
-    assert.strictEqual(res.guess, "Heads");
-    assert.strictEqual(res.bet, 100);
-    assert.strictEqual(res.profit, -100);
-    assert.strictEqual(res.balance, 900);
-    assert.strictEqual(res.totalWagered, 100);
-    assert.strictEqual(res.totalWon, 0);
-    assert.strictEqual(res.totalLost, 100);
-  } finally {
-    Math.random = orig;
-  }
+  fund("loss-user", 1000);
+  const res = play("loss-user", 100, "Heads", { rng: () => 1 });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.won, false);
+  assert.strictEqual(res.result, "Tails");
+  assert.strictEqual(res.guess, "Heads");
+  assert.strictEqual(res.bet, 100);
+  assert.strictEqual(res.profit, -100);
+  assert.strictEqual(res.balance, 900);
+  assert.strictEqual(res.totalWagered, 100);
+  assert.strictEqual(res.totalWon, 0);
+  assert.strictEqual(res.totalLost, 100);
 });
 
 test("coinflip play: guess case-insensitivity", async () => {
-  const orig = Math.random;
-  Math.random = () => 0;
-  try {
-    for (const guess of ["heads", "HEADS", "h", "Heads"]) {
-      fund(`case-${guess}`, 1000);
-      const res = play(`case-${guess}`, 10, guess);
-      assert.strictEqual(res.guess, "Heads", `guess ${guess} not normalized`);
-    }
-    Math.random = () => 1;
-    fund("case-tails", 1000);
-    const resT = play("case-tails", 10, "TAILS");
-    assert.strictEqual(resT.guess, "Tails");
-    assert.strictEqual(resT.won, true);
-  } finally {
-    Math.random = orig;
+  for (const guess of ["heads", "HEADS", "h", "Heads"]) {
+    fund(`case-${guess}`, 1000);
+    const res = play(`case-${guess}`, 10, guess, { rng: () => 0 });
+    assert.strictEqual(res.guess, "Heads", `guess ${guess} not normalized`);
   }
+  fund("case-tails", 1000);
+  const resT = play("case-tails", 10, "TAILS", { rng: () => 1 });
+  assert.strictEqual(resT.guess, "Tails");
+  assert.strictEqual(resT.won, true);
 });
 
 test("coinflip play: invalid bet", async () => {
@@ -210,4 +239,13 @@ test("cooldown reply format uses remaining time", async () => {
   resetCooldown("fmt");
 });
 
-test.after(() => store.stop());
+test.after(async () => {
+  await loading.catch(() => {});
+  try {
+    await store.flushNow();
+  } catch (_) {}
+  store.stop();
+  try {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  } catch (_) {}
+});

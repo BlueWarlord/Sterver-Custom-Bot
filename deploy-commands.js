@@ -2,10 +2,16 @@ require("dotenv").config();
 const { REST, Routes } = require("discord.js");
 const config = require("./config");
 const commands = require("./src/commands");
+const { validate } = require("./src/utils/config-validate");
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.CLIENT_ID;
 if (!token || !clientId) { console.error("DISCORD_TOKEN and CLIENT_ID must be set in .env"); process.exit(1); }
+const configErrors = validate(config);
+if (configErrors.length) {
+  configErrors.forEach((error) => console.error("CONFIG ERROR:", error));
+  process.exit(1);
+}
 const rest = new REST({ version: "10" }).setToken(token);
 
 (async () => {

@@ -2,6 +2,15 @@ const config = require("../../../config");
 const store = require("../store");
 const logger = require("../../utils/logger");
 const { now } = require("../../utils/time");
+const {
+  resolveRng,
+  resolveBetLimits,
+  resolveCooldownSeconds,
+  validateBet,
+  cooldownRemainingMs,
+  resolveHouseEdge,
+  applyHouseEdge,
+} = require("./common");
 
 const VALID_GUESSES = { heads: "Heads", tails: "Tails", h: "Heads", t: "Tails" };
 
@@ -11,96 +20,80 @@ function normalizeGuess(guess) {
   return VALID_GUESSES[key] || null;
 }
 
-function ensureUserIn(data, userId) {
-  let u = data.users[userId];
-  if (!u) {
-    u = {
-      balance: config.economy.startingBalance,
-      lastDailyAt: null,
-      lastActivityRewardAt: null,
-      totalEarned: 0,
-      totalGifted: 0,
-      totalReceived: 0,
-      totalWagered: 0,
-      totalWon: 0,
-      totalLost: 0,
-      lastFlipAt: null,
-      lastBlackjackAt: null,
-      createdAt: Date.now(),
-    };
-    data.users[userId] = u;
-  } else {
-    if (u.totalWagered == null) u.totalWagered = 0;
-    if (u.totalWon == null) u.totalWon = 0;
-    if (u.totalLost == null) u.totalLost = 0;
-    if (u.lastFlipAt == null) u.lastFlipAt = null;
-    if (u.lastBlackjackAt == null) u.lastBlackjackAt = null;
-  }
-  return u;
-}
+function play(userId, bet, guess, opts) {
+  const rng = resolveRng(opts);
 
-function play(userId, bet, guess) {
   if (!config.gambling.enabled) return { ok: false, code: "GAMBLING_DISABLED" };
-  if (!Number.isInteger(bet) || bet <= 0) return { ok: false, code: "INVALID_BET" };
-  if (bet < config.gambling.minBet) return { ok: false, code: "BET_TOO_SMALL" };
-  if (bet > config.gambling.maxBet) return { ok: false, code: "BET_TOO_LARGE" };
+
+  const betError = validateBet(bet, resolveBetLimits(config.gambling));
+  if (betError) return { ok: false, code: betError };
+
   const guessSide = normalizeGuess(guess);
   if (!guessSide) return { ok: false, code: "INVALID_GUESS" };
 
-  const cooldownMs = config.gambling.cooldownSeconds * 1000;
+  const cooldownMs = resolveCooldownSeconds(config.gambling) * 1000;
+  const payoutMultiplier = Number.isFinite(config.gambling.coinflipPayout)
+    ? config.gambling.coinflipPayout
+    : 2;
+  const houseEdge = resolveHouseEdge(config.gambling);
+
   let result;
   store.update((data) => {
-    const u = ensureUserIn(data, userId);
+    const u = store.ensureUserIn(data, userId).user;
 
-    if (u.lastFlipAt != null) {
-      const rem = (u.lastFlipAt + cooldownMs) - now();
-      if (rem > 0) { result = { ok: false, code: "ON_COOLDOWN", remainingMs: rem }; return; }
+    const remainingMs = cooldownRemainingMs(u.lastFlipAt, cooldownMs);
+    if (remainingMs > 0) {
+      result = { ok: false, code: "ON_COOLDOWN", remainingMs };
+      return;
     }
     if (u.balance < bet) {
       result = { ok: false, code: "INSUFFICIENT_FUNDS", balance: u.balance };
       return;
     }
 
-    const coinSide = Math.random() < 0.5 ? "Heads" : "Tails";
-    u.balance -= bet;
+    const coinSide = rng() < 0.5 ? "Heads" : "Tails";
+    const won = coinSide === guessSide;
+
+    // The gross return is 2x the stake by default. The house keeps a slice of
+    // winning returns, giving the configured expected-value edge.
+    const payout = won ? applyHouseEdge(bet * payoutMultiplier, houseEdge) : 0;
+    const profit = won ? payout - bet : -bet;
+    const finalBalance = u.balance - bet + payout;
+    if (!Number.isSafeInteger(payout) || !Number.isSafeInteger(finalBalance)) {
+      result = { ok: false, code: "AMOUNT_OVERFLOW", balance: u.balance };
+      return;
+    }
+
+    u.balance = finalBalance;
     u.totalWagered += bet;
     u.lastFlipAt = now();
+    if (profit > 0) u.totalWon += profit;
+    else if (profit < 0) u.totalLost += -profit;
 
-     if (coinSide === guessSide) {
-       const profit = bet * 2;
-       u.balance += bet * 3;
-       u.totalWon += profit;
-      result = {
-        ok: true,
-        won: true,
-        result: coinSide,
-        guess: guessSide,
-        bet,
-        profit,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("coinflip_win", { userId, bet, profit, balance: u.balance });
-    } else {
-      u.totalLost += bet;
-      result = {
-        ok: true,
-        won: false,
-        result: coinSide,
-        guess: guessSide,
-        bet,
-        profit: -bet,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("coinflip_loss", { userId, bet, balance: u.balance });
-    }
+    result = {
+      ok: true,
+      won,
+      result: coinSide,
+      guess: guessSide,
+      bet,
+      payout,
+      profit,
+      houseEdge,
+      balance: u.balance,
+      totalWagered: u.totalWagered,
+      totalWon: u.totalWon,
+      totalLost: u.totalLost,
+    };
+
+    logger.info(won ? "coinflip_win" : "coinflip_loss", {
+      userId,
+      bet,
+      profit,
+      balance: u.balance,
+    });
   });
+
   return result;
 }
 
-module.exports = { play };
+module.exports = { play, normalizeGuess };

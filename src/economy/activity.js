@@ -1,6 +1,5 @@
 const config = require("../../config");
 const store = require("./store");
-const wallet = require("./wallet");
 const { now } = require("../utils/time");
 const { randomInt } = require("../utils/random");
 
@@ -11,18 +10,33 @@ function tryReward(message) {
   if (message.webhookId) return;
   if (config.activity.ignoredChannelIds.includes(message.channel.id)) return;
   if (message.system) return;
+
   const userId = message.author.id;
-  const u = store.getUser(userId);
-  const last = u ? u.lastActivityRewardAt : null;
+  const timestamp = now();
   const cooldownMs = config.activity.cooldownSeconds * 1000;
-  const t = now();
-  if (last != null && t - last < cooldownMs) return;
-  const amount = randomInt(config.activity.amountMin, config.activity.amountMax);
-  const rec = store.ensureUser(userId);
-  rec.balance += amount;
-  rec.totalEarned += amount;
-  rec.lastActivityRewardAt = t;
-  store.update(() => {});
+
+  // Avoid dirtying the store on every chat message while the user is on
+  // cooldown. The check is repeated inside the transaction below.
+  const existing = store.getUser(userId);
+  if (
+    existing &&
+    existing.lastActivityRewardAt != null &&
+    timestamp - existing.lastActivityRewardAt < cooldownMs
+  ) {
+    return;
+  }
+
+  store.update((data) => {
+    const { user } = store.ensureUserIn(data, userId);
+    if (user.lastActivityRewardAt != null && timestamp - user.lastActivityRewardAt < cooldownMs) {
+      return;
+    }
+    const amount = randomInt(config.activity.amountMin, config.activity.amountMax);
+    if (!Number.isSafeInteger(user.balance + amount)) return;
+    user.balance += amount;
+    user.totalEarned += amount;
+    user.lastActivityRewardAt = timestamp;
+  });
 }
 
 module.exports = { tryReward };

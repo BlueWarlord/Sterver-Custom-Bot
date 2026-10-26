@@ -1,5 +1,17 @@
-const config = require("../../config");
-function now(){ return Date.now(); }
-function cooldownRemaining(lastAt, cooldownMs, n = now()){ if (lastAt == null) return 0; const rem = (lastAt + cooldownMs) - n; return rem > 0 ? rem : 0; }
-function randomIntervalMs(minMinutes, maxMinutes){ return (minMinutes + Math.random()*(maxMinutes-minMinutes))*60000; }
+const { randomFloat } = require("./random");
+
+function now() {
+  return Date.now();
+}
+
+function cooldownRemaining(lastAt, cooldownMs, current = now()) {
+  if (lastAt == null) return 0;
+  const remaining = (lastAt + cooldownMs) - current;
+  return remaining > 0 ? remaining : 0;
+}
+
+function randomIntervalMs(minMinutes, maxMinutes) {
+  return (minMinutes + randomFloat() * (maxMinutes - minMinutes)) * 60000;
+}
+
 module.exports = { now, cooldownRemaining, randomIntervalMs };

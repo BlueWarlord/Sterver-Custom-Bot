@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require("discord.js");
 const config = require("../../config");
 const { formatDuration } = require("../utils/format");
+const { getBetLimits, getCooldownSeconds, getHouseEdge, formatPercent } = require("./shared/gambling");
 
 const THEME_COLOR = 0xf1c40f;
 const ERROR_COLOR = 0xe74c3c;
@@ -14,6 +15,11 @@ const COMMAND_META = {
   leaderboard: { category: "Economy", example: ".leaderboard" },
   coinflip: { category: "Games", example: ".coinflip 100 heads" },
   blackjack: { category: "Games", example: ".blackjack 100" },
+  buy: { category: "Economy", example: ".buy wooden_sword" },
+  inventory: { category: "Economy", example: ".inventory" },
+  use: { category: "Economy", example: ".use wooden_sword" },
+  sell: { category: "Economy", example: ".sell wooden_sword 1" },
+  giveitem: { category: "Economy", example: ".giveitem @Sterver wooden_sword 1" },
   help: { category: "Info", example: ".help coinflip" },
 };
 
@@ -67,16 +73,20 @@ function optionLines(cmd) {
 
 function limitsFor(cmd) {
   switch (cmd.name) {
-    case "coinflip":
+    case "coinflip": {
       if (!config.gambling.enabled) return "Gambling is currently disabled.";
-      return `Bet ${coin(config.gambling.minBet)} – ${coin(config.gambling.maxBet)} · ${formatDuration(config.gambling.cooldownSeconds * 1000)} cooldown`;
+      const limits = getBetLimits(config.gambling);
+      const edge = getHouseEdge(config.gambling);
+      const edgeText = edge > 0 ? ` · ${formatPercent(edge)} house edge` : "";
+      return `Bet ${coin(limits.min)} – ${coin(limits.max)} · ${formatDuration(getCooldownSeconds(config.gambling) * 1000)} cooldown${edgeText}`;
+    }
     case "blackjack": {
-      const bj = config.blackjack || {};
       if (!config.gambling.enabled) return "Gambling is currently disabled.";
-      const min = bj.minBet != null ? bj.minBet : config.gambling.minBet;
-      const max = bj.maxBet != null ? bj.maxBet : config.gambling.maxBet;
-      const cooldown = bj.cooldownSeconds != null ? bj.cooldownSeconds : config.gambling.cooldownSeconds;
-      return `Bet ${coin(min)} – ${coin(max)} · ${formatDuration(cooldown * 1000)} cooldown · ${formatDuration(bj.timeoutMs || 60000)} per turn`;
+      const bj = config.blackjack || {};
+      const limits = getBetLimits(bj);
+      const edge = getHouseEdge(bj);
+      const edgeText = edge > 0 ? ` · ${formatPercent(edge)} house edge` : "";
+      return `Bet ${coin(limits.min)} – ${coin(limits.max)} · ${formatDuration(getCooldownSeconds(bj) * 1000)} cooldown · ${formatDuration(bj.timeoutMs || 60000)} per turn${edgeText}`;
     }
     case "daily":
       if (!config.daily.enabled) return "Daily rewards are currently disabled.";
@@ -166,6 +176,17 @@ function detailEmbed(client, cmd) {
   return embed;
 }
 
+function sanitizeQuery(value) {
+  return String(value ?? "")
+    .replace(/<@[!&]?\d+>/g, "")
+    .replace(/@(everyone|here)/gi, "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/[`*_~|>\\\[\]<>]/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 64)
+    .trim();
+}
+
 function notFoundEmbed(query, commands) {
   const suggestion = findClosest(query, commands);
   const hint = suggestion ? ` Did you mean \`${suggestion}\`?` : "";
@@ -213,11 +234,12 @@ function findClosest(query, commands) {
   return bestDistance <= Math.max(2, Math.floor(needle.length / 2)) ? best : null;
 }
 
-function buildEmbed(client, query) {
+function buildEmbed(client, rawQuery) {
   const commands = allCommands();
+  const query = sanitizeQuery(rawQuery);
   if (!query) return overviewEmbed(client);
   const cmd = resolveCommand(query);
-  return cmd ? detailEmbed(client, cmd) : notFoundEmbed(query.trim(), commands);
+  return cmd ? detailEmbed(client, cmd) : notFoundEmbed(query, commands);
 }
 
 module.exports = {
@@ -229,10 +251,17 @@ module.exports = {
     .addStringOption(o => o.setName("command").setDescription("Command to get details for").setRequired(false)),
   async executeSlash(interaction) {
     const query = interaction.options.getString("command");
-    await interaction.reply({ embeds: [buildEmbed(interaction.client, query)], flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      embeds: [buildEmbed(interaction.client, query)],
+      flags: MessageFlags.Ephemeral,
+      allowedMentions: { parse: [] },
+    });
   },
   async executePrefix(message, args) {
-    const query = args && args.length ? args[0] : null;
-    await message.reply({ embeds: [buildEmbed(message.client, query)], allowedMentions: { repliedUser: false } });
+    const query = args && args.length ? args.join(" ") : null;
+    await message.reply({
+      embeds: [buildEmbed(message.client, query)],
+      allowedMentions: { parse: [], repliedUser: false },
+    });
   },
 };

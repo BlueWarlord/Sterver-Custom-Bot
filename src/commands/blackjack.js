@@ -4,44 +4,33 @@ const {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
+  MessageFlags,
 } = require("discord.js");
 const config = require("../../config");
 const blackjack = require("../economy/games/blackjack");
-const { formatAmount, formatDuration } = require("../utils/format");
+const logger = require("../utils/logger");
+const { formatAmount } = require("../utils/format");
+const { getBetLimits, houseEdgeLabel, formatGamblingError } = require("./shared/gambling");
 
 const PLAY_AGAIN_PREFIX = "blackjack:playagain:";
 const NEW_BET_BUTTON = "blackjack:newbet";
 const NEW_BET_PREFIX = "blackjack:newbet:";
-// const NEW_BET_MODAL_PREFIX = "blackjack:newbet:";
-
-function getBetLimits() {
-  const bj = config.blackjack || {};
-  return {
-    min: bj.minBet != null ? bj.minBet : config.gambling.minBet,
-    max: bj.maxBet != null ? bj.maxBet : config.gambling.maxBet,
-  };
-}
 
 function parsePrefixArgs(args) {
   let bet = null;
   for (const arg of args) {
-    if (bet === null && /^\d+$/.test(arg)) { bet = parseInt(arg, 10); continue; }
+    if (bet === null && /^\d+$/.test(arg)) {
+      bet = Number(arg);
+      continue;
+    }
   }
   return { bet };
 }
 
 function formatError(res) {
-  const limits = getBetLimits();
+  const shared = formatGamblingError(res, config.blackjack);
+  if (shared) return shared;
   switch (res.code) {
-    case "GAMBLING_DISABLED": return "Gambling is currently disabled.";
-    case "INVALID_BET": return "Invalid bet amount.";
-    case "BET_TOO_SMALL": return `Minimum bet is ${formatAmount(limits.min)}.`;
-    case "BET_TOO_LARGE": return `Maximum bet is ${formatAmount(limits.max)}.`;
-    case "INSUFFICIENT_FUNDS": return `Insufficient funds. Balance: ${formatAmount(res.balance)}.`;
-    case "ON_COOLDOWN": return `You're on cooldown. Try again in ${formatDuration(res.remainingMs)}.`;
     case "GAME_IN_PROGRESS": return "You already have an active blackjack game.";
     case "NO_GAME": return "You don't have an active blackjack game.";
     case "CANNOT_DOUBLE": return "You can only double on your first two cards.";
@@ -51,7 +40,7 @@ function formatError(res) {
 
 function formatCards(cards) {
   if (!Array.isArray(cards)) return "";
-  return cards.map(c => `${c.rank}${c.suit}`).join(" ");
+  return cards.map(card => `${card.rank}${card.suit}`).join(" ");
 }
 
 function handTotal(cards) {
@@ -60,7 +49,7 @@ function handTotal(cards) {
 }
 
 function buildPlayingEmbed(user, game, res) {
-  const embed = new EmbedBuilder()
+  return new EmbedBuilder()
     .setTitle("Blackjack")
     .setColor(0x2ecc71)
     .addFields(
@@ -68,29 +57,31 @@ function buildPlayingEmbed(user, game, res) {
       { name: "Dealer's Hand", value: `${formatCards([game.dealer[0]])} [Hidden]\nVisible: ${blackjack.handValue([game.dealer[0]])}`, inline: true },
       { name: "Bet", value: `${formatAmount(res.totalBet || game.totalBet || res.bet)}`, inline: false }
     )
-    .setFooter({ text: "Hit, Stand, or Double (Double only on first two cards)" });
-  return embed;
+    .setFooter({
+      text: `Hit, Stand, or Double (Double only on first two cards) · ${houseEdgeLabel(config.blackjack)}`,
+    });
 }
 
 function buildEndedEmbed(user, res) {
   const playerTotal = handTotal(res.player);
   const dealerTotal = handTotal(res.dealer);
-  let desc = "";
-  if (res.result === "BLACKJACK") desc = `Blackjack! You win ${formatAmount(res.profit)}.`;
-  else if (res.result === "WIN") desc = `You win! +${formatAmount(res.profit)}.`;
-  else if (res.result === "LOSE") desc = `You lose. -${formatAmount(Math.abs(res.profit))}.`;
-  else if (res.result === "PUSH") desc = "Push. Bet returned.";
-  const embed = new EmbedBuilder()
+  let description = "";
+  if (res.result === "BLACKJACK") description = `Blackjack! You win ${formatAmount(res.profit)}.`;
+  else if (res.result === "WIN") description = `You win! +${formatAmount(res.profit)}.`;
+  else if (res.result === "LOSE") description = `You lose. -${formatAmount(Math.abs(res.profit))}.`;
+  else if (res.result === "PUSH") description = "Push. Bet returned.";
+
+  return new EmbedBuilder()
     .setTitle("Blackjack - Result")
     .setColor(res.result === "WIN" || res.result === "BLACKJACK" ? 0x2ecc71 : res.result === "PUSH" ? 0xf1c40f : 0xe74c3c)
-    .setDescription(desc)
+    .setDescription(description)
     .addFields(
       { name: "Your Hand", value: `${formatCards(res.player)}\nTotal: ${playerTotal}`, inline: true },
       { name: "Dealer's Hand", value: `${formatCards(res.dealer)}\nTotal: ${dealerTotal}`, inline: true },
       { name: "Profit/Loss", value: res.profit >= 0 ? `+${formatAmount(res.profit)}` : `-${formatAmount(Math.abs(res.profit))}`, inline: true },
       { name: "New Balance", value: `${formatAmount(res.balance)}`, inline: true }
-    );
-  return embed;
+    )
+    .setFooter({ text: `SterCoin Blackjack · ${houseEdgeLabel(config.blackjack)}` });
 }
 
 function buildRow(canDouble) {
@@ -119,7 +110,7 @@ function buildPlayAgainRow(bet) {
 }
 
 function buildBetButtons() {
-  const limits = getBetLimits();
+  const limits = getBetLimits(config.blackjack);
   const row = new ActionRowBuilder();
   row.addComponents(
     new ButtonBuilder()
@@ -176,117 +167,156 @@ function startGame(user, bet) {
 function attachCollector(msg, user) {
   if (!msg || typeof msg.createMessageComponentCollector !== "function") return;
 
-  const filter = i => i.user.id === user.id && i.customId.startsWith("blackjack:");
-  const collector = msg.createMessageComponentCollector({ filter, time: getTimeoutMs() });
-  // The game this message belongs to (null when the message already shows a result).
+  const filter = (interaction) =>
+    interaction.user.id === user.id &&
+    interaction.guildId === config.discord.guildId &&
+    interaction.customId.startsWith("blackjack:");
+  // Use idle rather than an absolute lifetime so every action resets the
+  // per-turn timer. The server-side game timer is the authoritative fallback.
+  const collector = msg.createMessageComponentCollector({
+    filter,
+    idle: getTimeoutMs() + 5000,
+  });
   const ownedGame = blackjack.getGame(user.id) || null;
 
-  const endGame = async (i, res) => {
-    await i.update({
+  const endGame = async (interaction, res) => {
+    await interaction.update({
       embeds: [buildEndedEmbed(user, res)],
       components: [buildPlayAgainRow(res.bet)],
       allowedMentions: { parse: [] },
     });
   };
 
-  const fail = async (i, res) => {
-    await i.update({ content: formatError(res), embeds: [], components: [], allowedMentions: { parse: [] } });
+  const fail = async (interaction, res) => {
+    await interaction.update({
+      content: formatError(res),
+      embeds: [],
+      components: [],
+      allowedMentions: { parse: [] },
+    });
     collector.stop("err");
   };
 
   // Replays in the same message, exactly like clicking again in coinflip.
-  const replay = async (i, bet) => {
+  const replay = async (interaction, bet) => {
     const started = startGame(user, bet);
     if (!started.ok) {
-      await i.reply({ content: started.error, ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: started.error, flags: MessageFlags.Ephemeral }).catch(() => {});
       return;
     }
     collector.stop("replay");
     try {
-      await i.update(started.payload);
-      attachCollector(i.message, user);
-    } catch (e) {
-      console.error(e);
+      await interaction.update(started.payload);
+      attachCollector(interaction.message, user);
+    } catch (error) {
+      logger.warn("blackjack replay update failed", { error });
     }
   };
 
-  const askNewBet = async (i) => {
-    // Show bet selection buttons in the same message
-    const betRow = buildBetButtons();
+  const askNewBet = async (interaction) => {
     try {
-      await i.update({
+      await interaction.update({
         embeds: [new EmbedBuilder().setTitle("Blackjack - Choose New Bet").setDescription("Select a bet amount").setColor(0x3498db)],
-        components: [betRow],
+        components: [buildBetButtons()],
         allowedMentions: { parse: [] },
       });
-    } catch (e) {
-      console.error(e);
-      return;
+    } catch (error) {
+      logger.warn("blackjack new-bet update failed", { error });
     }
   };
 
-  collector.on("collect", async i => {
+  // The game module owns the server-side timer. When it settles the hand, stop
+  // the collector and render the result so the message cannot stay stale.
+  if (ownedGame) {
+    blackjack.setTimeoutHandler(user.id, async (res) => {
+      try {
+        collector.stop("timeout");
+      } catch (_) {}
+      try {
+        await msg.edit({
+          embeds: [buildEndedEmbed(user, res)],
+          components: [buildPlayAgainRow(res.bet)],
+          allowedMentions: { parse: [] },
+        });
+        attachCollector(msg, user);
+      } catch (error) {
+        logger.warn("blackjack timeout update failed", { error });
+      }
+    });
+  }
+
+  collector.on("collect", async (interaction) => {
     try {
-      if (i.customId.startsWith(PLAY_AGAIN_PREFIX)) {
-        const bet = parseInt(i.customId.slice(PLAY_AGAIN_PREFIX.length), 10);
-        await replay(i, bet);
+      if (interaction.customId.startsWith(PLAY_AGAIN_PREFIX)) {
+        const bet = Number(interaction.customId.slice(PLAY_AGAIN_PREFIX.length));
+        await replay(interaction, bet);
         return;
       }
 
-      if (i.customId === NEW_BET_BUTTON || i.customId.startsWith(NEW_BET_PREFIX)) {
-        if (i.customId.startsWith(NEW_BET_PREFIX) && i.customId !== NEW_BET_BUTTON) {
-          const betStr = i.customId.slice(NEW_BET_PREFIX.length);
-          const bet = parseInt(betStr, 10);
-          await replay(i, bet);
+      if (interaction.customId === NEW_BET_BUTTON || interaction.customId.startsWith(NEW_BET_PREFIX)) {
+        if (interaction.customId.startsWith(NEW_BET_PREFIX) && interaction.customId !== NEW_BET_BUTTON) {
+          const bet = Number(interaction.customId.slice(NEW_BET_PREFIX.length));
+          await replay(interaction, bet);
           return;
         }
-        await askNewBet(i);
+        await askNewBet(interaction);
         return;
       }
 
-      if (i.customId === "blackjack:hit") {
-        const hres = blackjack.hit(user.id);
-        if (!hres.ok) return fail(i, hres);
-        if (hres.ended) return endGame(i, hres);
+      if (interaction.customId === "blackjack:hit") {
+        const hitResult = blackjack.hit(user.id);
+        if (!hitResult.ok) return fail(interaction, hitResult);
+        if (hitResult.ended) return endGame(interaction, hitResult);
         const game = blackjack.getGame(user.id);
-        await i.update({ embeds: [buildPlayingEmbed(user, game, hres)], components: [buildRow(false)], allowedMentions: { parse: [] } });
+        await interaction.update({
+          embeds: [buildPlayingEmbed(user, game, hitResult)],
+          components: [buildRow(false)],
+          allowedMentions: { parse: [] },
+        });
         return;
       }
 
-      if (i.customId === "blackjack:stand") {
-        const sres = blackjack.stand(user.id);
-        if (!sres.ok) return fail(i, sres);
-        return endGame(i, sres);
+      if (interaction.customId === "blackjack:stand") {
+        const standResult = blackjack.stand(user.id);
+        if (!standResult.ok) return fail(interaction, standResult);
+        return endGame(interaction, standResult);
       }
 
-      if (i.customId === "blackjack:double") {
-        const dres = blackjack.double(user.id);
-        if (!dres.ok) return fail(i, dres);
-        return endGame(i, dres);
+      if (interaction.customId === "blackjack:double") {
+        const doubleResult = blackjack.double(user.id);
+        if (!doubleResult.ok) return fail(interaction, doubleResult);
+        return endGame(interaction, doubleResult);
       }
-    } catch (e) {
-      console.error(e);
+    } catch (error) {
+      logger.error("blackjack collector error", { error });
     }
   });
 
   collector.on("end", async (_collected, reason) => {
-    if (reason !== "time") return;
+    if (reason !== "idle" && reason !== "time") return;
 
     if (!ownedGame || blackjack.getGame(user.id) !== ownedGame) {
       // The game already finished (or was replaced by a newer one); keep the
       // result embed and just drop the buttons.
-      try { await msg.edit({ components: [] }); } catch (_) {}
+      try {
+        await msg.edit({ components: [] });
+      } catch (_) {}
       return;
     }
 
-    const tres = blackjack.forceStandTimeout(user.id);
-    if (tres && tres.ok && tres.ended) {
+    const timeoutResult = blackjack.forceStandTimeout(user.id);
+    if (timeoutResult && timeoutResult.ok && timeoutResult.ended) {
       try {
-        await msg.edit({ embeds: [buildEndedEmbed(user, tres)], components: [buildPlayAgainRow(tres.bet)], allowedMentions: { parse: [] } });
+        await msg.edit({
+          embeds: [buildEndedEmbed(user, timeoutResult)],
+          components: [buildPlayAgainRow(timeoutResult.bet)],
+          allowedMentions: { parse: [] },
+        });
         attachCollector(msg, user);
         return;
       } catch (_) {}
     }
+
     try {
       await msg.edit({ content: "Blackjack timed out.", embeds: [], components: [], allowedMentions: { parse: [] } });
     } catch (_) {}
@@ -300,20 +330,36 @@ module.exports = {
     .setName("blackjack")
     .setDescription("Play blackjack")
     .addIntegerOption(o => {
-      const limits = getBetLimits();
+      const limits = getBetLimits(config.blackjack);
       return o.setName("bet").setDescription("Bet amount").setRequired(true).setMinValue(limits.min).setMaxValue(limits.max);
     }),
   async executeSlash(interaction) {
     const started = startGame(interaction.user, interaction.options.getInteger("bet"));
-    if (!started.ok) return interaction.reply({ content: started.error, ephemeral: true });
-    const msg = await interaction.reply({ ...started.payload, fetchReply: true });
-    attachCollector(msg, interaction.user);
+    if (!started.ok) return interaction.reply({ content: started.error, flags: MessageFlags.Ephemeral });
+
+    let message;
+    try {
+      message = await interaction.reply({ ...started.payload, fetchReply: true });
+    } catch (error) {
+      // The game was already created and the bet debited. Settle it instead of
+      // leaving the user permanently locked out.
+      blackjack.forceStandTimeout(interaction.user.id);
+      throw error;
+    }
+    attachCollector(message, interaction.user);
   },
   async executePrefix(message, args) {
     const parsed = parsePrefixArgs(args);
     const started = startGame(message.author, parsed.bet);
-    if (!started.ok) return message.reply({ content: started.error, allowedMentions: { repliedUser: false } });
-    const msg = await message.reply(started.payload);
-    attachCollector(msg, message.author);
+    if (!started.ok) return message.reply({ content: started.error, allowedMentions: { parse: [], repliedUser: false } });
+
+    let reply;
+    try {
+      reply = await message.reply(started.payload);
+    } catch (error) {
+      blackjack.forceStandTimeout(message.author.id);
+      throw error;
+    }
+    attachCollector(reply, message.author);
   },
 };

@@ -1,7 +1,5 @@
 const { SlashCommandBuilder, MessageFlags } = require("discord.js");
-const config = require("../../config");
 const wallet = require("../economy/wallet");
-const store = require("../economy/store");
 const { formatAmount } = require("../utils/format");
 
 module.exports = {
@@ -12,7 +10,10 @@ module.exports = {
     const target = interaction.options.getUser("user") || interaction.user;
     if (target.bot) return interaction.reply({ content: "Bots don't have balances.", flags: MessageFlags.Ephemeral });
     const bal = wallet.getBalance(target.id);
-    await interaction.reply({ content: `${target}'s balance: ${formatAmount(bal)}` });
+    await interaction.reply({
+      content: `${target}'s balance: ${formatAmount(bal)}`,
+      allowedMentions: { parse: [] },
+    });
   },
   async executePrefix(message, args) {
     let target = message.mentions.users.first() || message.author;

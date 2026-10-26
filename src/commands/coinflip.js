@@ -1,15 +1,18 @@
-const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require("discord.js");
+const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags } = require("discord.js");
 const config = require("../../config");
 const { play } = require("../economy/games/coinflip");
-const { formatAmount, formatDuration } = require("../utils/format");
+const logger = require("../utils/logger");
+const { formatAmount } = require("../utils/format");
+const { getBetLimits, houseEdgeLabel, formatGamblingError } = require("./shared/gambling");
 
 const PLAY_AGAIN_PREFIX = "coinflip:playagain:";
+const BET_LIMITS = getBetLimits(config.gambling);
 
 function parsePrefixArgs(args) {
   let bet = null;
   let guess = null;
   for (const arg of args) {
-    if (bet === null && /^\d+$/.test(arg)) { bet = parseInt(arg, 10); continue; }
+    if (bet === null && /^\d+$/.test(arg)) { bet = Number(arg); continue; }
     const lower = arg.toLowerCase();
     if (lower === "heads" || lower === "tails" || lower === "h" || lower === "t") {
       guess = lower === "h" ? "Heads" : lower === "t" ? "Tails" : lower[0].toUpperCase() + lower.slice(1);
@@ -19,14 +22,11 @@ function parsePrefixArgs(args) {
 }
 
 function formatError(res) {
+  const shared = formatGamblingError(res, config.gambling);
+  if (shared) return shared;
   switch (res.code) {
-    case "GAMBLING_DISABLED": return "Gambling is currently disabled.";
-    case "INVALID_BET": return "Invalid bet amount.";
-    case "BET_TOO_SMALL": return `Minimum bet is ${formatAmount(config.gambling.minBet)}.`;
-    case "BET_TOO_LARGE": return `Maximum bet is ${formatAmount(config.gambling.maxBet)}.`;
-    case "INSUFFICIENT_FUNDS": return `Insufficient funds. Balance: ${formatAmount(res.balance)}.`;
-    case "ON_COOLDOWN": return `You're on cooldown. Try again in ${formatDuration(res.remainingMs)}.`;
     case "INVALID_GUESS": return "Guess must be Heads or Tails.";
+    case "AMOUNT_OVERFLOW": return "That bet is too large to settle.";
     default: return "Something went wrong.";
   }
 }
@@ -42,7 +42,7 @@ function buildResultEmbed(user, res) {
       { name: "Profit/Loss", value: res.profit >= 0 ? `+${formatAmount(res.profit)}` : `-${formatAmount(Math.abs(res.profit))}`, inline: true },
       { name: "New Balance", value: formatAmount(res.balance), inline: true }
     )
-    .setFooter({ text: `${user.username} · SterCoin` });
+    .setFooter({ text: `${user.username} · SterCoin · ${houseEdgeLabel(config.gambling)}` });
   return embed;
 }
 
@@ -64,26 +64,33 @@ function buildPlayAgainRow(bet) {
 function attachCollector(msg, user) {
   if (!msg || typeof msg.createMessageComponentCollector !== "function") return;
 
-  const filter = i => i.user.id === user.id && i.customId.startsWith(PLAY_AGAIN_PREFIX);
+  const filter = (interaction) =>
+    interaction.user.id === user.id &&
+    interaction.guildId === config.discord.guildId &&
+    interaction.customId.startsWith(PLAY_AGAIN_PREFIX);
   const collector = msg.createMessageComponentCollector({ filter, time: 60000 });
 
-  collector.on("collect", async i => {
+  collector.on("collect", async (interaction) => {
     try {
-      const [betPart, guess] = i.customId.slice(PLAY_AGAIN_PREFIX.length).split(":");
-      const bet = parseInt(betPart, 10);
+      const [betPart, guess] = interaction.customId.slice(PLAY_AGAIN_PREFIX.length).split(":");
+      const bet = Number(betPart);
       const res = play(user.id, bet, guess);
       if (!res.ok) {
-        await i.reply({ content: formatError(res), ephemeral: true });
+        await interaction.reply({ content: formatError(res), flags: MessageFlags.Ephemeral });
         return;
       }
-      await i.update({ embeds: [buildResultEmbed(user, res)], components: [buildPlayAgainRow(res.bet)], allowedMentions: { parse: [] } });
-    } catch (e) {
-      console.error(e);
+      await interaction.update({
+        embeds: [buildResultEmbed(user, res)],
+        components: [buildPlayAgainRow(res.bet)],
+        allowedMentions: { parse: [] },
+      });
+    } catch (error) {
+      logger.error("coinflip collector error", { error });
     }
   });
 
   collector.on("end", () => {
-    try { msg.edit({ components: [] }); } catch (_) {}
+    msg.edit({ components: [] }).catch(() => {});
   });
 }
 
@@ -93,14 +100,14 @@ module.exports = {
   slash: new SlashCommandBuilder()
     .setName("coinflip")
     .setDescription("Flip a coin and bet on the outcome")
-    .addIntegerOption(o => o.setName("amount").setDescription("Bet amount").setRequired(true).setMinValue(config.gambling.minBet).setMaxValue(config.gambling.maxBet))
+    .addIntegerOption(o => o.setName("amount").setDescription("Bet amount").setRequired(true).setMinValue(BET_LIMITS.min).setMaxValue(BET_LIMITS.max))
     .addStringOption(o => o.setName("guess").setDescription("Your guess").setRequired(true)
       .addChoices({ name: "Heads", value: "Heads" }, { name: "Tails", value: "Tails" })),
   async executeSlash(interaction) {
     const bet = interaction.options.getInteger("amount");
     const guess = interaction.options.getString("guess");
     const res = play(interaction.user.id, bet, guess);
-    if (!res.ok) return interaction.reply({ content: formatError(res), ephemeral: true });
+    if (!res.ok) return interaction.reply({ content: formatError(res), flags: MessageFlags.Ephemeral });
     const embed = buildResultEmbed(interaction.user, res);
     const row = buildPlayAgainRow(res.bet);
     const msg = await interaction.reply({ embeds: [embed], components: [row], allowedMentions: { parse: [] }, fetchReply: true });

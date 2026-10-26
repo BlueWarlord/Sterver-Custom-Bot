@@ -3,86 +3,185 @@ const store = require("./store");
 const logger = require("../utils/logger");
 const { randomInt } = require("../utils/random");
 
-function getRecord(userId) { return store.getUser(userId); }
+let leaderboardCache = { revision: -1, size: 0, entries: [] };
+
+function getRecord(userId) {
+  return store.getUser(userId);
+}
 
 function getBalance(userId) {
-  const u = store.getUser(userId);
-  return u ? u.balance : config.economy.startingBalance;
+  const user = store.getUser(userId);
+  if (!user) return config.economy.startingBalance;
+  if (!Number.isSafeInteger(user.balance) || user.balance < 0) {
+    return store.ensureUser(userId).balance;
+  }
+  return user.balance;
 }
 
 function credit(userId, amount, reason) {
-  if (!Number.isInteger(amount) || amount <= 0) return { ok: false, code: "INVALID_AMOUNT" };
-  const u = store.ensureUser(userId);
-  u.balance += amount;
-  if (reason === "activity" || reason === "daily" || reason === "drop") u.totalEarned += amount;
-  store.update(() => {}); logger.info("credit", { reason, userId, amount, balance: u.balance });
-  return { ok: true, balance: u.balance };
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    return { ok: false, code: "INVALID_AMOUNT" };
+  }
+
+  let result;
+  store.update((data) => {
+    const { user } = store.ensureUserIn(data, userId);
+    if (!Number.isSafeInteger(user.balance + amount)) {
+      result = { ok: false, code: "AMOUNT_OVERFLOW", balance: user.balance };
+      return;
+    }
+    user.balance += amount;
+    if (reason === "activity" || reason === "daily" || reason === "drop") {
+      user.totalEarned += amount;
+    }
+    result = { ok: true, balance: user.balance };
+  });
+
+  if (result.ok) {
+    logger.info("credit", { reason, userId, amount, balance: result.balance });
+  }
+  return result;
 }
 
 function debit(userId, amount, reason) {
-  if (!Number.isInteger(amount) || amount <= 0) return { ok: false, code: "INVALID_AMOUNT" };
-  const u = store.ensureUser(userId);
-  if (u.balance < amount) return { ok: false, code: "INSUFFICIENT_FUNDS", balance: u.balance };
-  u.balance -= amount;
-  if (reason === "gift_sent") u.totalGifted += amount;
-  store.update(() => {}); logger.info("debit", { reason, userId, amount, balance: u.balance });
-  return { ok: true, balance: u.balance };
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    return { ok: false, code: "INVALID_AMOUNT" };
+  }
+
+  let result;
+  store.update((data) => {
+    const { user } = store.ensureUserIn(data, userId);
+    if (user.balance < amount) {
+      result = { ok: false, code: "INSUFFICIENT_FUNDS", balance: user.balance };
+      return;
+    }
+    user.balance -= amount;
+    if (reason === "gift_sent") user.totalGifted += amount;
+    result = { ok: true, balance: user.balance };
+  });
+
+  if (result.ok) {
+    logger.info("debit", { reason, userId, amount, balance: result.balance });
+  }
+  return result;
 }
 
 function transfer(fromId, toId, amount) {
   if (fromId === toId) return { ok: false, code: "SELF_TRANSFER" };
-  if (!Number.isInteger(amount) || amount <= 0) return { ok: false, code: "INVALID_AMOUNT" };
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    return { ok: false, code: "INVALID_AMOUNT" };
+  }
+
+  const maxPerDay = config.gift.maxPerDay;
   let result;
   store.update((data) => {
-    const from = data.users[fromId] || null;
-    // ensure records
-    if (!data.users[fromId]) data.users[fromId] = { balance: config.economy.startingBalance, lastDailyAt: null, lastActivityRewardAt: null, totalEarned: 0, totalGifted: 0, totalReceived: 0, createdAt: Date.now() };
-    if (!data.users[toId]) data.users[toId] = { balance: config.economy.startingBalance, lastDailyAt: null, lastActivityRewardAt: null, totalEarned: 0, totalGifted: 0, totalReceived: 0, createdAt: Date.now() };
-    const fu = data.users[fromId];
-    const tu = data.users[toId];
-    if (fu.balance < amount) { result = { ok: false, code: "INSUFFICIENT_FUNDS" }; return; }
-    fu.balance -= amount;
-    fu.totalGifted += amount;
-    tu.balance += amount;
-    tu.totalReceived += amount;
-    result = { ok: true };
+    const from = store.ensureUserIn(data, fromId).user;
+    const to = store.ensureUserIn(data, toId).user;
+
+    if (from.balance < amount) {
+      result = { ok: false, code: "INSUFFICIENT_FUNDS", balance: from.balance };
+      return;
+    }
+
+    if (!Number.isSafeInteger(to.balance + amount)) {
+      result = { ok: false, code: "AMOUNT_OVERFLOW" };
+      return;
+    }
+
+    if (maxPerDay != null) {
+      const day = new Date().toISOString().slice(0, 10);
+      if (from.giftDay !== day) {
+        from.giftDay = day;
+        from.giftSentToday = 0;
+      }
+      if (!Number.isSafeInteger(from.giftSentToday) || from.giftSentToday < 0) {
+        from.giftSentToday = 0;
+      }
+      if (from.giftSentToday + amount > maxPerDay) {
+        result = {
+          ok: false,
+          code: "GIFT_LIMIT",
+          remaining: Math.max(0, maxPerDay - from.giftSentToday),
+        };
+        return;
+      }
+      from.giftSentToday += amount;
+    }
+
+    from.balance -= amount;
+    from.totalGifted += amount;
+    to.balance += amount;
+    to.totalReceived += amount;
+    result = { ok: true, balance: from.balance };
   });
+
   return result;
 }
 
 function canClaimDaily(userId, nowTs) {
-  const u = store.getUser(userId);
-  if (!u || u.lastDailyAt == null) return { ok: true, remainingMs: 0 };
+  const user = store.getUser(userId);
+  if (!user || user.lastDailyAt == null) return { ok: true, remainingMs: 0 };
   const cooldownMs = config.daily.cooldownHours * 3600 * 1000;
-  const rem = (u.lastDailyAt + cooldownMs) - nowTs;
-  if (rem <= 0) return { ok: true, remainingMs: 0 };
-  return { ok: false, remainingMs: rem };
+  const remainingMs = (user.lastDailyAt + cooldownMs) - nowTs;
+  if (remainingMs <= 0) return { ok: true, remainingMs: 0 };
+  return { ok: false, remainingMs };
 }
 
 function claimDaily(userId, nowTs) {
-  const check = canClaimDaily(userId, nowTs);
-  if (!check.ok) return { ok: false, code: "ON_COOLDOWN", remainingMs: check.remainingMs };
-  const amount = randomInt(config.daily.amountMin, config.daily.amountMax);
-  const u = store.ensureUser(userId);
-  u.balance += amount;
-  u.totalEarned += amount;
-  u.lastDailyAt = nowTs;
-  store.update(() => {});
-  // ensure persisted via ensureUser already scheduled? ensureUser schedules flush on create only; need schedule
-  // schedule flush manually:
-  // store.update already called above with no-op schedules flush
-  logger.info("daily", { userId, amount, balance: u.balance });
-  return { ok: true, amount, balance: u.balance };
+  const cooldownMs = config.daily.cooldownHours * 3600 * 1000;
+  let result;
+
+  store.update((data) => {
+    const { user } = store.ensureUserIn(data, userId);
+    if (user.lastDailyAt != null) {
+      const remainingMs = (user.lastDailyAt + cooldownMs) - nowTs;
+      if (remainingMs > 0) {
+        result = { ok: false, code: "ON_COOLDOWN", remainingMs };
+        return;
+      }
+    }
+
+    const amount = randomInt(config.daily.amountMin, config.daily.amountMax);
+    if (!Number.isSafeInteger(user.balance + amount)) {
+      result = { ok: false, code: "AMOUNT_OVERFLOW", balance: user.balance };
+      return;
+    }
+
+    user.balance += amount;
+    user.totalEarned += amount;
+    user.lastDailyAt = nowTs;
+    result = { ok: true, amount, balance: user.balance };
+  });
+
+  if (result.ok) {
+    logger.info("daily", { userId, amount: result.amount, balance: result.balance });
+  }
+  return result;
 }
 
 function getLeaderboard(size) {
+  if (leaderboardCache.revision === store.revision && leaderboardCache.size === size) {
+    return leaderboardCache.entries.map((entry) => ({ ...entry }));
+  }
+
   const data = store.snapshot();
   const entries = Object.entries(data.users)
-    .map(([id, u]) => ({ id, balance: u.balance, createdAt: u.createdAt }))
-    .filter(e => e.balance > 0)
-    .sort((a,b) => b.balance - a.balance || a.createdAt - b.createdAt)
+    .map(([id, user]) => ({ id, balance: user.balance, createdAt: user.createdAt }))
+    .filter((entry) => Number.isSafeInteger(entry.balance) && entry.balance > 0)
+    .sort((a, b) => b.balance - a.balance || a.createdAt - b.createdAt)
     .slice(0, size);
-  return entries;
+
+  leaderboardCache = { revision: store.revision, size, entries };
+  return entries.map((entry) => ({ ...entry }));
 }
 
-module.exports = { getBalance, credit, debit, transfer, canClaimDaily, claimDaily, getLeaderboard };
+module.exports = {
+  getRecord,
+  getBalance,
+  credit,
+  debit,
+  transfer,
+  canClaimDaily,
+  claimDaily,
+  getLeaderboard,
+};

@@ -1,16 +1,18 @@
 const assert = require("node:assert");
 const { test } = require("node:test");
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
 const config = require("./config");
-config.storage.path = path.join(os.tmpdir(), `sterbot-inv-test-${process.pid}-${Date.now()}.json`);
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sterbot-inv-test-"));
+config.storage.path = path.join(tempDir, "data.json");
 
 const store = require("./src/economy/store");
 const wallet = require("./src/economy/wallet");
 const inventory = require("./src/economy/inventory");
 
-store.load();
+const loading = store.load();
 
 test("ensureUser initializes inventory and ownedRoles", async () => {
   const u = store.ensureUser("u1");
@@ -33,21 +35,28 @@ test("buy/sell/use/give flow", async () => {
   assert.strictEqual(sellRes.ok, true);
   assert.strictEqual(sellRes.total, 25); // 50% of 50
   assert.strictEqual(store.ensureUser("receiver").balance >= 25, true);
-  // buy again and use
+  // buy again; an item without useEffect must not be consumed by /use
   store.ensureUser("u2").balance = 100;
   store.update(() => {});
   inventory.buyItem("u2", "wooden_sword");
   const useRes = inventory.useItem("u2", "wooden_sword");
-  assert.strictEqual(useRes.ok, true);
-  assert.strictEqual(store.ensureUser("u2").inventory.wooden_sword, undefined);
+  assert.strictEqual(useRes.ok, false);
+  assert.strictEqual(useRes.code, "NOT_USABLE");
+  assert.strictEqual(store.ensureUser("u2").inventory.wooden_sword, 1);
 });
 
 test("role grant and expiry cleanup", async () => {
   const u = store.ensureUser("r1");
   u.balance = 10000;
   store.update(() => {});
+  const member = {
+    roles: {
+      add: async () => {},
+      cache: { has: () => false },
+    },
+  };
   // temp role
-  const res = inventory.buyRole("r1", "temp_supporter", null);
+  const res = await inventory.buyRole("r1", "temp_supporter", member);
   assert.strictEqual(res.ok, true);
   const owned = store.ensureUser("r1").ownedRoles;
   const keys = Object.keys(owned);
@@ -60,4 +69,13 @@ test("role grant and expiry cleanup", async () => {
   assert.strictEqual(Object.keys(store.ensureUser("r1").ownedRoles).length, 0);
 });
 
-test.after(() => store.stop());
+test.after(async () => {
+  await loading.catch(() => {});
+  try {
+    await store.flushNow();
+  } catch (_) {}
+  store.stop();
+  try {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  } catch (_) {}
+});

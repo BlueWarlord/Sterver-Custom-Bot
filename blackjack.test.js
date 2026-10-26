@@ -1,23 +1,32 @@
 const assert = require("node:assert");
 const { test } = require("node:test");
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
 const config = require("./config");
-config.storage.path = path.join(os.tmpdir(), `sterbot-bj-test-${process.pid}-${Date.now()}.json`);
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sterbot-bj-test-"));
+config.storage.path = path.join(tempDir, "data.json");
 if (!config.blackjack) {
   config.blackjack = {
     minBet: 1,
     maxBet: 1000,
     cooldownSeconds: 7,
     blackjackPayout: 1.5,
+    houseEdge: null,
     dealerHitsSoft17: false,
     timeoutMs: 60000,
   };
 }
 
+const originalBlackjack = JSON.parse(JSON.stringify(config.blackjack));
+const originalGambling = JSON.parse(JSON.stringify(config.gambling));
+// The legacy payout assertions below exercise gross payouts. House-edge
+// behavior has dedicated tests further down.
+config.blackjack.houseEdge = 0;
+
 const store = require("./src/economy/store");
-store.load();
+const loading = store.load();
 
 const blackjack = require("./src/economy/games/blackjack");
 
@@ -62,6 +71,104 @@ test("blackjack: player natural pays 3:2", () => {
   assert.strictEqual(res.profit, 150);
   assert.strictEqual(res.balance, 1150);
   resetCooldown("bj-nat");
+});
+
+test("blackjack: house edge reduces a natural blackjack payout", () => {
+  const previous = config.blackjack.houseEdge;
+  config.blackjack.houseEdge = 0.05;
+  try {
+    fund("bj-edge", 1000);
+    const res = blackjack.start("bj-edge", 100, { rng: () => 0 });
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.result, "BLACKJACK");
+    assert.strictEqual(res.houseEdge, 0.05);
+    assert.strictEqual(res.payout, 237);
+    assert.strictEqual(res.profit, 137);
+    assert.strictEqual(res.balance, 1137);
+    resetCooldown("bj-edge");
+  } finally {
+    config.blackjack.houseEdge = previous;
+  }
+});
+
+test("blackjack: regular win applies the house edge", () => {
+  const previous = config.blackjack.houseEdge;
+  config.blackjack.houseEdge = 0.05;
+  try {
+    const userId = "bj-edge-win";
+    fund(userId, 1000);
+
+    let started = null;
+    for (let i = 0; i < 20; i++) {
+      resetCooldown(userId);
+      const res = blackjack.start(userId, 100, { rng: () => ((i % 8) + 1) / 10 });
+      if (res.ok && !res.ended) {
+        started = res;
+        break;
+      }
+    }
+    assert.ok(started, "expected a non-natural starting hand");
+
+    const game = blackjack.getGame(userId);
+    game.player.splice(0, game.player.length,
+      { rank: "10", suit: "♠" },
+      { rank: "8", suit: "♥" }
+    );
+    game.dealer.splice(0, game.dealer.length,
+      { rank: "10", suit: "♦" },
+      { rank: "7", suit: "♣" }
+    );
+
+    const res = blackjack.stand(userId);
+    assert.strictEqual(res.result, "WIN");
+    assert.strictEqual(res.houseEdge, 0.05);
+    assert.strictEqual(res.payout, 190);
+    assert.strictEqual(res.profit, 90);
+    assert.strictEqual(res.balance, 1090);
+    resetCooldown(userId);
+  } finally {
+    config.blackjack.houseEdge = previous;
+  }
+});
+
+test("blackjack: fractional payouts round down to whole coins", () => {
+  const previous = config.blackjack.houseEdge;
+  config.blackjack.houseEdge = 0.05;
+  try {
+    fund("bj-rounding", 1000);
+    const res = blackjack.start("bj-rounding", 25, { rng: () => 0 });
+    // 25 * (1 + 1.5) * 0.95 = 59.375, which must become 59 whole coins.
+    assert.strictEqual(res.result, "BLACKJACK");
+    assert.strictEqual(res.payout, 59);
+    assert.strictEqual(res.profit, 34);
+    assert.strictEqual(res.balance, 1034);
+    assert.ok(Number.isSafeInteger(res.payout));
+    assert.ok(Number.isSafeInteger(res.profit));
+    assert.ok(Number.isSafeInteger(res.balance));
+    resetCooldown("bj-rounding");
+  } finally {
+    config.blackjack.houseEdge = previous;
+  }
+});
+
+test("blackjack: null houseEdge inherits gambling.houseEdge", () => {
+  const previousBlackjackEdge = config.blackjack.houseEdge;
+  const previousGamblingEdge = config.gambling.houseEdge;
+  config.blackjack.houseEdge = null;
+  config.gambling.houseEdge = 0.05;
+  try {
+    fund("bj-inherit", 1000);
+    const res = blackjack.start("bj-inherit", 100, { rng: () => 0 });
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.result, "BLACKJACK");
+    assert.strictEqual(res.houseEdge, 0.05);
+    assert.strictEqual(res.payout, 237);
+    assert.strictEqual(res.profit, 137);
+    resetCooldown("bj-inherit");
+  } finally {
+    config.blackjack.houseEdge = previousBlackjackEdge;
+    config.gambling.houseEdge = previousGamblingEdge;
+  }
 });
 
 test("blackjack: both naturals push", () => {
@@ -137,6 +244,46 @@ test("blackjack: double bet doubled, one card, auto stand", () => {
   resetCooldown("bj-dbl");
 });
 
+test("blackjack: double-down bust is a loss (regression)", () => {
+  const userId = "bj-dbust";
+  fund(userId, 1000);
+
+  let started = null;
+  for (let i = 0; i < 20; i++) {
+    resetCooldown(userId);
+    const res = blackjack.start(userId, 100, { rng: () => ((i % 8) + 1) / 10 });
+    if (res.ok && !res.ended) {
+      started = res;
+      break;
+    }
+    if (res.ok && res.ended) {
+      resetCooldown(userId);
+    }
+  }
+  assert.ok(started, "expected a non-natural starting hand");
+
+  const game = blackjack.getGame(userId);
+  game.player.splice(0, game.player.length,
+    { rank: "10", suit: "♠" },
+    { rank: "6", suit: "♥" }
+  );
+  game.dealer.splice(0, game.dealer.length,
+    { rank: "10", suit: "♦" },
+    { rank: "7", suit: "♣" }
+  );
+  game.deck.push({ rank: "10", suit: "♠" });
+
+  const res = blackjack.double(userId);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.ended, true);
+  assert.strictEqual(res.result, "LOSE");
+  assert.strictEqual(res.totalBet, 200);
+  assert.strictEqual(res.profit, -200);
+  assert.strictEqual(res.balance, 800);
+  assert.strictEqual(store.getUser(userId).balance, 800);
+  resetCooldown(userId);
+});
+
 test("blackjack: validations", () => {
   fund("bj-bad", 1000);
   assert.strictEqual(blackjack.start("bj-bad", 0).code, "INVALID_BET");
@@ -205,4 +352,16 @@ test("blackjack: command exports", () => {
   }
 });
 
-test.after(() => store.stop());
+test.after(async () => {
+  blackjack.shutdown();
+  await loading.catch(() => {});
+  try {
+    await store.flushNow();
+  } catch (_) {}
+  store.stop();
+  config.blackjack = originalBlackjack;
+  config.gambling = originalGambling;
+  try {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  } catch (_) {}
+});

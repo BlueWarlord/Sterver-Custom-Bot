@@ -1,21 +1,46 @@
+const { PermissionFlagsBits } = require("discord.js");
 const config = require("../../config");
 const store = require("./store");
 const wallet = require("./wallet");
+const logger = require("../utils/logger");
 
 let roleExpiryTimer = null;
+let roleCleanupRunning = false;
+
+const roleLocks = new Map();
+
+// Serialize role mutations per user so a purchase cannot race an expiry removal.
+async function withRoleLock(userId, task) {
+  while (roleLocks.has(userId)) {
+    await roleLocks.get(userId).catch(() => {});
+  }
+
+  let release;
+  const lock = new Promise((resolve) => {
+    release = resolve;
+  });
+  roleLocks.set(userId, lock);
+
+  try {
+    return await task();
+  } finally {
+    roleLocks.delete(userId);
+    release();
+  }
+}
 
 function getCatalog() {
   return config.inventory || { items: [], roles: [] };
 }
 
 function findItem(itemId) {
-  const cat = getCatalog();
-  return (cat.items || []).find(i => i.id === itemId) || null;
+  const catalog = getCatalog();
+  return (catalog.items || []).find((item) => item.id === itemId) || null;
 }
 
 function findRole(roleId) {
-  const cat = getCatalog();
-  return (cat.roles || []).find(r => r.id === roleId) || null;
+  const catalog = getCatalog();
+  return (catalog.roles || []).find((role) => role.id === roleId) || null;
 }
 
 function getSellPrice(entry) {
@@ -27,138 +52,327 @@ function buyItem(userId, itemId) {
   const item = findItem(itemId);
   if (!item) return { ok: false, code: "UNKNOWN_ITEM" };
   const price = item.price;
-  if (!Number.isInteger(price) || price < 0) return { ok: false, code: "INVALID_PRICE" };
-  const deb = wallet.debit(userId, price, "buy");
-  if (!deb.ok) return deb;
-  const u = store.ensureUser(userId);
-  if (!u.inventory) u.inventory = {};
-  u.inventory[itemId] = (u.inventory[itemId] || 0) + 1;
-  store.update(() => {});
-  return { ok: true, itemId, balance: deb.balance };
+  if (!Number.isSafeInteger(price) || price < 0) {
+    return { ok: false, code: "INVALID_PRICE" };
+  }
+
+  let result;
+  store.update((data) => {
+    const { user } = store.ensureUserIn(data, userId);
+    const current = Number.isSafeInteger(user.inventory[itemId]) && user.inventory[itemId] > 0
+      ? user.inventory[itemId]
+      : 0;
+    if (!Number.isSafeInteger(current + 1)) {
+      result = { ok: false, code: "INVENTORY_OVERFLOW" };
+      return;
+    }
+    if (price > 0 && user.balance < price) {
+      result = { ok: false, code: "INSUFFICIENT_FUNDS", balance: user.balance };
+      return;
+    }
+
+    if (price > 0) user.balance -= price;
+    user.inventory[itemId] = current + 1;
+    result = { ok: true, itemId, balance: user.balance };
+  });
+
+  return result;
 }
 
-function buyRole(userId, roleId, member) {
-  const role = findRole(roleId);
-  if (!role) return { ok: false, code: "UNKNOWN_ROLE" };
-  const price = role.price;
-  if (!Number.isInteger(price) || price < 0) return { ok: false, code: "INVALID_PRICE" };
-  const deb = wallet.debit(userId, price, "buy_role");
-  if (!deb.ok) return deb;
-  const u = store.ensureUser(userId);
-  if (!u.ownedRoles) u.ownedRoles = {};
-  const expiresAt = role.durationMs == null ? null : Date.now() + role.durationMs;
-  try {
-    if (member && role.roleId) {
-      member.roles.add(role.roleId).catch(() => {});
-    }
-  } catch (e) {
-    // refund on failure
-    const u2 = store.ensureUser(userId);
-    u2.balance += price;
-    store.update(() => {});
-    return { ok: false, code: "ROLE_ASSIGN_FAILED" };
+async function resolveTargetRole(member, role) {
+  if (!member || !member.guild) return { ok: true, targetRole: null };
+  const guild = member.guild;
+
+  let me = guild.members?.me || null;
+  if (!me && typeof guild.members?.fetchMe === "function") {
+    me = await guild.members.fetchMe().catch(() => null);
   }
-  u.ownedRoles[role.roleId] = { expiresAt };
-  store.update(() => {});
-  return { ok: true, roleId, expiresAt, balance: deb.balance };
+  if (!me || !me.permissions?.has?.(PermissionFlagsBits.ManageRoles)) {
+    return { ok: false, code: "MANAGE_ROLES_REQUIRED" };
+  }
+
+  let targetRole = guild.roles?.cache?.get?.(role.roleId) || null;
+  if (!targetRole && typeof guild.roles?.fetch === "function") {
+    targetRole = await guild.roles.fetch(role.roleId).catch(() => null);
+  }
+  if (!targetRole) return { ok: false, code: "ROLE_NOT_FOUND" };
+  if (targetRole.managed) return { ok: false, code: "ROLE_MANAGED" };
+  if (
+    me.roles?.highest &&
+    typeof me.roles.highest.comparePositionTo === "function" &&
+    me.roles.highest.comparePositionTo(targetRole) <= 0
+  ) {
+    return { ok: false, code: "ROLE_HIERARCHY" };
+  }
+
+  return { ok: true, targetRole };
+}
+
+async function buyRole(userId, roleId, member) {
+  return withRoleLock(userId, async () => {
+    const role = findRole(roleId);
+    if (!role) return { ok: false, code: "UNKNOWN_ROLE" };
+    if (typeof role.roleId !== "string" || !/^\d+$/.test(role.roleId)) {
+      return { ok: false, code: "ROLE_NOT_CONFIGURED" };
+    }
+    if (!member || !member.roles || typeof member.roles.add !== "function") {
+      return { ok: false, code: "ROLE_ASSIGN_FAILED" };
+    }
+
+    const price = role.price;
+    if (!Number.isSafeInteger(price) || price < 0) {
+      return { ok: false, code: "INVALID_PRICE" };
+    }
+    if (role.durationMs != null && (!Number.isSafeInteger(role.durationMs) || role.durationMs <= 0)) {
+      return { ok: false, code: "INVALID_DURATION" };
+    }
+    const expiresAt = role.durationMs == null ? null : Date.now() + role.durationMs;
+    if (expiresAt != null && !Number.isSafeInteger(expiresAt)) {
+      return { ok: false, code: "INVALID_DURATION" };
+    }
+
+    const preflight = await resolveTargetRole(member, role);
+    if (!preflight.ok) return preflight;
+
+    if (member.roles.cache?.has?.(role.roleId)) {
+      return { ok: false, code: "ALREADY_OWNED" };
+    }
+
+    const live = store.getUser(userId);
+    const existing = live?.ownedRoles?.[role.roleId];
+    if (existing && (existing.expiresAt == null || existing.expiresAt > Date.now())) {
+      return { ok: false, code: "ALREADY_OWNED" };
+    }
+
+    let charged = false;
+    if (price > 0) {
+      const debit = wallet.debit(userId, price, "buy_role");
+      if (!debit.ok) return debit;
+      charged = true;
+    }
+
+    try {
+      await member.roles.add(role.roleId);
+    } catch (error) {
+      if (charged) wallet.credit(userId, price, "role_refund");
+      logger.warn("role grant failed; purchase refunded", {
+        userId,
+        roleId: role.roleId,
+        error,
+      });
+      return { ok: false, code: "ROLE_ASSIGN_FAILED" };
+    }
+
+    let result;
+    store.update((data) => {
+      const { user } = store.ensureUserIn(data, userId);
+      user.ownedRoles[role.roleId] = { expiresAt, grantedByBot: true };
+      result = { ok: true, roleId, expiresAt, balance: user.balance };
+    });
+    return result;
+  });
 }
 
 function sellItem(userId, itemId, quantity) {
   const qty = quantity == null ? 1 : quantity;
-  if (!Number.isInteger(qty) || qty <= 0) return { ok: false, code: "INVALID_QUANTITY" };
+  if (!Number.isSafeInteger(qty) || qty <= 0) {
+    return { ok: false, code: "INVALID_QUANTITY" };
+  }
+
   const item = findItem(itemId);
   if (!item) return { ok: false, code: "UNKNOWN_ITEM" };
-  const u = store.ensureUser(userId);
-  if (!u.inventory) u.inventory = {};
-  const have = u.inventory[itemId] || 0;
-  if (have < qty) return { ok: false, code: "NOT_ENOUGH" };
+
   const sellPrice = getSellPrice(item);
-  const total = sellPrice * qty;
-  u.inventory[itemId] = have - qty;
-  if (u.inventory[itemId] === 0) {
-    delete u.inventory[itemId];
+  if (!Number.isSafeInteger(sellPrice) || sellPrice < 0) {
+    return { ok: false, code: "INVALID_PRICE" };
   }
-  u.balance += total;
-  store.update(() => {});
-  return { ok: true, itemId, quantity: qty, total, balance: u.balance };
+
+  let result;
+  store.update((data) => {
+    const { user } = store.ensureUserIn(data, userId);
+    const have = Number.isSafeInteger(user.inventory[itemId]) ? user.inventory[itemId] : 0;
+    if (have < qty) {
+      result = { ok: false, code: "NOT_ENOUGH" };
+      return;
+    }
+
+    const total = sellPrice * qty;
+    if (!Number.isSafeInteger(total) || !Number.isSafeInteger(user.balance + total)) {
+      result = { ok: false, code: "AMOUNT_OVERFLOW" };
+      return;
+    }
+
+    user.inventory[itemId] = have - qty;
+    if (user.inventory[itemId] === 0) delete user.inventory[itemId];
+    user.balance += total;
+    result = { ok: true, itemId, quantity: qty, total, balance: user.balance };
+  });
+
+  return result;
 }
 
 function useItem(userId, itemId) {
   const item = findItem(itemId);
   if (!item) return { ok: false, code: "UNKNOWN_ITEM" };
-  const u = store.ensureUser(userId);
-  if (!u.inventory) u.inventory = {};
-  const have = u.inventory[itemId] || 0;
-  if (have < 1) return { ok: false, code: "NOT_OWNED" };
-  u.inventory[itemId] = have - 1;
-  if (u.inventory[itemId] === 0) {
-    delete u.inventory[itemId];
+
+  const effect = item.useEffect;
+  if (!effect) return { ok: false, code: "NOT_USABLE" };
+  if (effect.type !== "coins" || !Number.isSafeInteger(effect.amount) || effect.amount <= 0) {
+    return { ok: false, code: "INVALID_EFFECT" };
   }
-  store.update(() => {});
-  return { ok: true, itemId };
+
+  let result;
+  store.update((data) => {
+    const { user } = store.ensureUserIn(data, userId);
+    const have = Number.isSafeInteger(user.inventory[itemId]) ? user.inventory[itemId] : 0;
+    if (have < 1) {
+      result = { ok: false, code: "NOT_OWNED" };
+      return;
+    }
+    if (!Number.isSafeInteger(user.balance + effect.amount)) {
+      result = { ok: false, code: "AMOUNT_OVERFLOW" };
+      return;
+    }
+
+    user.inventory[itemId] = have - 1;
+    if (user.inventory[itemId] === 0) delete user.inventory[itemId];
+    user.balance += effect.amount;
+    result = { ok: true, itemId, amount: effect.amount, balance: user.balance };
+  });
+
+  return result;
 }
 
 function giveItem(fromId, toId, itemId, quantity) {
   const qty = quantity == null ? 1 : quantity;
   if (fromId === toId) return { ok: false, code: "SELF_TRANSFER" };
-  if (!Number.isInteger(qty) || qty <= 0) return { ok: false, code: "INVALID_QUANTITY" };
+  if (!Number.isSafeInteger(qty) || qty <= 0) {
+    return { ok: false, code: "INVALID_QUANTITY" };
+  }
+
   const item = findItem(itemId);
   if (!item) return { ok: false, code: "UNKNOWN_ITEM" };
+
   let result;
   store.update((data) => {
-    if (!data.users[fromId]) data.users[fromId] = { balance: config.economy.startingBalance, inventory: {}, ownedRoles: {} };
-    if (!data.users[toId]) data.users[toId] = { balance: config.economy.startingBalance, inventory: {}, ownedRoles: {} };
-    const fu = data.users[fromId];
-    const tu = data.users[toId];
-    if (!fu.inventory) fu.inventory = {};
-    if (!tu.inventory) tu.inventory = {};
-    const have = fu.inventory[itemId] || 0;
-    if (have < qty) { result = { ok: false, code: "NOT_ENOUGH" }; return; }
-    fu.inventory[itemId] = have - qty;
-    if (fu.inventory[itemId] === 0) delete fu.inventory[itemId];
-    tu.inventory[itemId] = (tu.inventory[itemId] || 0) + qty;
+    const from = store.ensureUserIn(data, fromId).user;
+    const to = store.ensureUserIn(data, toId).user;
+
+    const have = Number.isSafeInteger(from.inventory[itemId]) ? from.inventory[itemId] : 0;
+    if (have < qty) {
+      result = { ok: false, code: "NOT_ENOUGH" };
+      return;
+    }
+
+    const received = Number.isSafeInteger(to.inventory[itemId]) ? to.inventory[itemId] : 0;
+    if (!Number.isSafeInteger(received + qty)) {
+      result = { ok: false, code: "INVENTORY_OVERFLOW" };
+      return;
+    }
+
+    from.inventory[itemId] = have - qty;
+    if (from.inventory[itemId] === 0) delete from.inventory[itemId];
+    to.inventory[itemId] = received + qty;
     result = { ok: true };
   });
+
   return result;
+}
+
+function removeOwnedRoleRecord(userId, roleId, cutoff) {
+  store.update((data) => {
+    const user = data.users[userId];
+    const record = user?.ownedRoles?.[roleId];
+    if (record && record.expiresAt != null && record.expiresAt <= cutoff) {
+      delete user.ownedRoles[roleId];
+    }
+  });
 }
 
 async function cleanupExpiredRoles(guild) {
   if (!guild) return;
-  const now = Date.now();
-  const data = store.snapshot();
-  const cat = getCatalog();
-  const roleMap = {};
-  (cat.roles || []).forEach(r => { if (r.roleId) roleMap[r.roleId] = r; });
-  let changed = false;
-  for (const [userId, user] of Object.entries(data.users || {})) {
-    if (!user.ownedRoles) continue;
-    for (const [roleId, info] of Object.entries(user.ownedRoles)) {
-      if (info && info.expiresAt != null && info.expiresAt <= now) {
-        try {
-          const member = await guild.members.fetch(userId).catch(() => null);
-          if (member && member.roles.cache.has(roleId)) {
-            await member.roles.remove(roleId).catch(() => {});
-          }
-        } catch (_) {}
-        delete user.ownedRoles[roleId];
-        changed = true;
+
+  const nowTs = Date.now();
+  const expired = [];
+
+  // This loop is synchronous; collect first, then perform the Discord calls.
+  for (const [userId, user] of Object.entries(store.data.users || {})) {
+    for (const [roleId, info] of Object.entries(user.ownedRoles || {})) {
+      if (info && info.expiresAt != null && info.expiresAt <= nowTs) {
+        expired.push({ userId, roleId });
       }
     }
   }
-  if (changed) {
-    store.data = data;
-    store.update(() => {});
+
+  for (const { userId, roleId } of expired) {
+    await withRoleLock(userId, async () => {
+      // Re-check live state: the role may have been repurchased while an
+      // earlier iteration was waiting on Discord.
+      const live = store.getUser(userId)?.ownedRoles?.[roleId];
+      if (!live || live.expiresAt == null || live.expiresAt > Date.now()) return;
+
+      let member;
+      try {
+        member = await guild.members.fetch(userId);
+      } catch (error) {
+        if (error.code === 10007 || error.code === 10013) {
+          // Unknown member/user: the Discord role is already gone.
+          removeOwnedRoleRecord(userId, roleId, nowTs);
+          return;
+        }
+        logger.warn("role expiry fetch failed; will retry", {
+          userId,
+          roleId,
+          error,
+        });
+        return;
+      }
+
+      if (!member) {
+        removeOwnedRoleRecord(userId, roleId, nowTs);
+        return;
+      }
+
+      if (member.roles?.cache?.has?.(roleId)) {
+        try {
+          await member.roles.remove(roleId);
+        } catch (error) {
+          logger.warn("role removal failed; will retry", { userId, roleId, error });
+          return;
+        }
+      }
+
+      removeOwnedRoleRecord(userId, roleId, nowTs);
+    });
+  }
+}
+
+async function runRoleCleanup(guild) {
+  if (roleCleanupRunning) return;
+  roleCleanupRunning = true;
+  try {
+    await cleanupExpiredRoles(guild);
+  } catch (error) {
+    logger.error("role expiry cleanup failed", { error });
+  } finally {
+    roleCleanupRunning = false;
   }
 }
 
 function startRoleExpiryTimer(client) {
   if (roleExpiryTimer) return;
-  const guild = client.guilds.cache.get(config.discord.guildId);
-  cleanupExpiredRoles(guild);
-  roleExpiryTimer = setInterval(() => {
-    const g = client.guilds.cache.get(config.discord.guildId);
-    cleanupExpiredRoles(g);
-  }, 60 * 1000);
+
+  const run = () => {
+    const guild = client.guilds.cache.get(config.discord.guildId);
+    if (!guild) {
+      logger.warn("role expiry skipped: configured guild is not cached");
+      return;
+    }
+    runRoleCleanup(guild);
+  };
+
+  run();
+  roleExpiryTimer = setInterval(run, 60 * 1000);
 }
 
 function stopRoleExpiryTimer() {

@@ -1,13 +1,15 @@
 const assert = require("node:assert");
 const { test } = require("node:test");
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
 const config = require("./config");
-config.storage.path = path.join(os.tmpdir(), `sterbot-test-${process.pid}-${Date.now()}.json`);
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sterbot-store-test-"));
+config.storage.path = path.join(tempDir, "data.json");
 
 const store = require("./src/economy/store");
-store.load();
+const loading = store.load();
 
 test("store.ensureUser initializes gambling stats to 0", async () => {
   const u = store.ensureUser("new-user");
@@ -30,4 +32,13 @@ test("store.ensureUser backfills missing fields on old records", async () => {
   assert.strictEqual(u.balance, 42);
 });
 
-test.after(() => store.stop());
+test.after(async () => {
+  await loading.catch(() => {});
+  try {
+    await store.flushNow();
+  } catch (_) {}
+  store.stop();
+  try {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  } catch (_) {}
+});

@@ -2,6 +2,16 @@ const config = require("../../../config");
 const store = require("../store");
 const logger = require("../../utils/logger");
 const { now } = require("../../utils/time");
+const { randomFloat } = require("../../utils/random");
+const {
+  resolveRng,
+  resolveBetLimits,
+  resolveCooldownSeconds,
+  validateBet,
+  cooldownRemainingMs,
+  resolveHouseEdge,
+  applyHouseEdge,
+} = require("./common");
 
 const SUITS = ["♠", "♥", "♦", "♣"];
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
@@ -9,7 +19,7 @@ const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 const games = new Map();
 
 function createDeck(rng) {
-  if (typeof rng !== "function") rng = Math.random;
+  const source = typeof rng === "function" ? rng : randomFloat;
   const deck = [];
   for (let s = 0; s < SUITS.length; s++) {
     for (let r = 0; r < RANKS.length; r++) {
@@ -17,12 +27,21 @@ function createDeck(rng) {
     }
   }
   for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
+    const raw = Number(source());
+    const roll = Number.isFinite(raw)
+      ? Math.min(Math.max(raw, 0), 0.9999999999999999)
+      : 0;
+    const j = Math.floor(roll * (i + 1));
     const tmp = deck[i];
     deck[i] = deck[j];
     deck[j] = tmp;
   }
   return deck;
+}
+
+function drawCard(game) {
+  if (game.deck.length === 0) game.deck = createDeck();
+  return game.deck.pop();
 }
 
 function cardValue(rank) {
@@ -35,9 +54,9 @@ function handValue(cards) {
   let total = 0;
   let aces = 0;
   for (let i = 0; i < cards.length; i++) {
-    const c = cards[i];
-    if (c.rank === "A") aces++;
-    total += cardValue(c.rank);
+    const card = cards[i];
+    if (card.rank === "A") aces++;
+    total += cardValue(card.rank);
   }
   while (total > 21 && aces > 0) {
     total -= 10;
@@ -46,60 +65,180 @@ function handValue(cards) {
   return total;
 }
 
-function isNaturalBlackjack(cards) {
-  if (!Array.isArray(cards) || cards.length !== 2) return false;
-  const v = handValue(cards);
-  return v === 21;
+function isSoft17(cards) {
+  let total = 0;
+  let aces = 0;
+  for (const card of cards) {
+    if (card.rank === "A") aces++;
+    total += cardValue(card.rank);
+  }
+  while (total > 21 && aces > 0) {
+    total -= 10;
+    aces--;
+  }
+  return total === 17 && aces > 0;
 }
 
-function ensureUserIn(data, userId) {
-  let u = data.users[userId];
-  if (!u) {
-    u = {
-      balance: config.economy.startingBalance,
-      lastDailyAt: null,
-      lastActivityRewardAt: null,
-      totalEarned: 0,
-      totalGifted: 0,
-      totalReceived: 0,
-      totalWagered: 0,
-      totalWon: 0,
-      totalLost: 0,
-      lastFlipAt: null,
-      lastBlackjackAt: null,
-      createdAt: Date.now(),
-    };
-    data.users[userId] = u;
-  } else {
-    if (u.totalWagered == null) u.totalWagered = 0;
-    if (u.totalWon == null) u.totalWon = 0;
-    if (u.totalLost == null) u.totalLost = 0;
-    if (u.lastFlipAt == null) u.lastFlipAt = null;
-    if (u.lastBlackjackAt == null) u.lastBlackjackAt = null;
+function isNaturalBlackjack(cards) {
+  if (!Array.isArray(cards) || cards.length !== 2) return false;
+  return handValue(cards) === 21;
+}
+
+function blackjackConfig() {
+  return config.blackjack || {};
+}
+
+function getTimeoutMs() {
+  const cfg = blackjackConfig();
+  return Number.isInteger(cfg.timeoutMs) && cfg.timeoutMs > 0 ? cfg.timeoutMs : 60000;
+}
+
+function getHouseEdge() {
+  return resolveHouseEdge(blackjackConfig(), config.gambling.houseEdge);
+}
+
+function clearGameTimer(game) {
+  if (game.timeoutId) {
+    clearTimeout(game.timeoutId);
+    game.timeoutId = null;
   }
-  return u;
+}
+
+function armTimeout(game) {
+  clearGameTimer(game);
+  if (game.ended) return;
+
+  game.timeoutId = setTimeout(() => {
+    game.timeoutId = null;
+    try {
+      const current = games.get(game.userId);
+      if (current !== game || game.ended) return;
+      const result = settle(game);
+      if (result && typeof game.onTimeout === "function") {
+        try {
+          const pending = game.onTimeout(result);
+          if (pending && typeof pending.catch === "function") {
+            pending.catch((error) => logger.error("blackjack timeout handler failed", {
+              userId: game.userId,
+              error,
+            }));
+          }
+        } catch (error) {
+          logger.error("blackjack timeout handler failed", { userId: game.userId, error });
+        }
+      }
+    } catch (error) {
+      logger.error("blackjack timeout settlement failed", { userId: game.userId, error });
+    }
+  }, getTimeoutMs());
+
+  if (typeof game.timeoutId.unref === "function") game.timeoutId.unref();
+}
+
+// Applies the final payout to the user and turns the game into a result object.
+// `payout` is the amount returned to the player after the stake was debited.
+function finishGame(game, user, outcome, payout) {
+  const profit = payout - game.totalBet;
+  if (profit > 0) user.totalWon += profit;
+  else if (profit < 0) user.totalLost += -profit;
+
+  user.balance += payout;
+  user.lastBlackjackAt = now();
+
+  game.ended = true;
+  clearGameTimer(game);
+  games.delete(game.userId);
+
+  const log = {
+    userId: game.userId,
+    bet: game.totalBet,
+    profit,
+    balance: user.balance,
+  };
+  if (outcome === "PUSH") logger.info("blackjack_push", { userId: game.userId, bet: game.totalBet });
+  else if (outcome === "LOSE") logger.info("blackjack_loss", { userId: game.userId, bet: game.totalBet });
+  else if (outcome === "BLACKJACK") logger.info("blackjack_blackjack", log);
+  else logger.info("blackjack_win", log);
+
+  return {
+    ok: true,
+    ended: true,
+    result: outcome,
+    player: game.player,
+    dealer: game.dealer,
+    bet: game.bet,
+    totalBet: game.totalBet,
+    payout,
+    profit,
+    houseEdge: game.houseEdge != null ? game.houseEdge : getHouseEdge(),
+    balance: user.balance,
+    totalWagered: user.totalWagered,
+    totalWon: user.totalWon,
+    totalLost: user.totalLost,
+  };
+}
+
+function drawDealerToStand(game) {
+  const dealerHitsSoft17 = blackjackConfig().dealerHitsSoft17 === true;
+
+  while (true) {
+    const total = handValue(game.dealer);
+    if (total < 17) {
+      game.dealer.push(drawCard(game));
+      continue;
+    }
+    if (total === 17 && dealerHitsSoft17 && isSoft17(game.dealer)) {
+      game.dealer.push(drawCard(game));
+      continue;
+    }
+    break;
+  }
+}
+
+function resolveSettlement(game, user) {
+  if (game.houseEdge == null) game.houseEdge = getHouseEdge();
+
+  const playerTotal = handValue(game.player);
+  if (playerTotal > 21) {
+    return finishGame(game, user, "LOSE", 0);
+  }
+
+  drawDealerToStand(game);
+  const dealerTotal = handValue(game.dealer);
+
+  if (dealerTotal > 21 || playerTotal > dealerTotal) {
+    const payout = applyHouseEdge(game.totalBet * 2, game.houseEdge);
+    return finishGame(game, user, "WIN", payout);
+  }
+
+  if (playerTotal < dealerTotal) {
+    return finishGame(game, user, "LOSE", 0);
+  }
+
+  return finishGame(game, user, "PUSH", game.totalBet);
 }
 
 function start(userId, bet, opts) {
-  if (!opts) opts = {};
-  const cfg = config.blackjack || {};
+  const options = opts || {};
+  const cfg = blackjackConfig();
+
   if (!config.gambling.enabled) return { ok: false, code: "GAMBLING_DISABLED" };
-  if (!Number.isInteger(bet) || bet <= 0) return { ok: false, code: "INVALID_BET" };
-  const minBet = cfg.minBet != null ? cfg.minBet : config.gambling.minBet;
-  const maxBet = cfg.maxBet != null ? cfg.maxBet : config.gambling.maxBet;
-  if (bet < minBet) return { ok: false, code: "BET_TOO_SMALL" };
-  if (bet > maxBet) return { ok: false, code: "BET_TOO_LARGE" };
+
+  const betError = validateBet(bet, resolveBetLimits(cfg, config.gambling));
+  if (betError) return { ok: false, code: betError };
   if (games.has(userId)) return { ok: false, code: "GAME_IN_PROGRESS" };
 
-  const rng = opts.rng || Math.random;
+  const rng = resolveRng(options);
+  const cooldownMs = resolveCooldownSeconds(cfg, config.gambling) * 1000;
+
   let result;
   store.update((data) => {
-    const u = ensureUserIn(data, userId);
-    const cooldownSec = cfg.cooldownSeconds != null ? cfg.cooldownSeconds : config.gambling.cooldownSeconds;
-    const cooldownMs = cooldownSec * 1000;
-    if (u.lastBlackjackAt != null) {
-      const rem = (u.lastBlackjackAt + cooldownMs) - now();
-      if (rem > 0) { result = { ok: false, code: "ON_COOLDOWN", remainingMs: rem }; return; }
+    const u = store.ensureUserIn(data, userId).user;
+
+    const remainingMs = cooldownRemainingMs(u.lastBlackjackAt, cooldownMs);
+    if (remainingMs > 0) {
+      result = { ok: false, code: "ON_COOLDOWN", remainingMs };
+      return;
     }
     if (u.balance < bet) {
       result = { ok: false, code: "INSUFFICIENT_FUNDS", balance: u.balance };
@@ -122,85 +261,34 @@ function start(userId, bet, opts) {
       doubled: false,
       ended: false,
       timeoutId: null,
+      onTimeout: typeof options.onTimeout === "function" ? options.onTimeout : null,
+      houseEdge: getHouseEdge(),
       createdAt: now(),
     };
 
+    const playerNatural = isNaturalBlackjack(player);
+    const dealerNatural = isNaturalBlackjack(dealer);
+
+    if (dealerNatural && playerNatural) {
+      result = finishGame(game, u, "PUSH", bet);
+      return;
+    }
+
+    if (dealerNatural) {
+      result = finishGame(game, u, "LOSE", 0);
+      return;
+    }
+
+    if (playerNatural) {
+      const payoutRatio = cfg.blackjackPayout != null ? cfg.blackjackPayout : 1.5;
+      const grossReturn = bet * (1 + payoutRatio);
+      const payout = applyHouseEdge(grossReturn, game.houseEdge);
+      result = finishGame(game, u, "BLACKJACK", payout);
+      return;
+    }
+
     games.set(userId, game);
-
-    const playerNat = isNaturalBlackjack(player);
-    const dealerNat = isNaturalBlackjack(dealer);
-
-    if (dealerNat && playerNat) {
-      game.ended = true;
-      u.balance += bet;
-      u.lastBlackjackAt = now();
-      games.delete(userId);
-      result = {
-        ok: true,
-        ended: true,
-        result: "PUSH",
-        player,
-        dealer,
-        bet,
-        totalBet: bet,
-        profit: 0,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("blackjack_push", { userId, bet });
-      return;
-    }
-    if (dealerNat && !playerNat) {
-      game.ended = true;
-      u.totalLost += bet;
-      u.lastBlackjackAt = now();
-      games.delete(userId);
-      result = {
-        ok: true,
-        ended: true,
-        result: "LOSE",
-        player,
-        dealer,
-        bet,
-        totalBet: bet,
-        profit: -bet,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("blackjack_loss", { userId, bet });
-      return;
-    }
-    if (playerNat && !dealerNat) {
-      game.ended = true;
-      const payoutMult = (cfg.blackjackPayout != null ? cfg.blackjackPayout : 1.5) + 1;
-      const payout = Math.floor(bet * payoutMult);
-      const profit = payout - bet;
-      u.balance += payout;
-      u.totalWon += profit;
-      u.lastBlackjackAt = now();
-      games.delete(userId);
-      result = {
-        ok: true,
-        ended: true,
-        result: "BLACKJACK",
-        player,
-        dealer,
-        bet,
-        totalBet: bet,
-        profit,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("blackjack_blackjack", { userId, bet, profit });
-      return;
-    }
-
+    armTimeout(game);
     result = {
       ok: true,
       ended: false,
@@ -211,19 +299,29 @@ function start(userId, bet, opts) {
       canDouble: true,
     };
   });
+
   return result;
 }
 
 function hit(userId) {
   const game = games.get(userId);
   if (!game || game.ended) return { ok: false, code: "NO_GAME" };
-  const card = game.deck.pop();
-  game.player.push(card);
-  const pv = handValue(game.player);
-  if (pv > 21) {
-    return settle(game, "BUST");
+
+  game.player.push(drawCard(game));
+  if (handValue(game.player) > 21) {
+    return settle(game);
   }
-  return { ok: true, ended: false, player: game.player, dealer: game.dealer, bet: game.bet, totalBet: game.totalBet, canDouble: false };
+
+  armTimeout(game);
+  return {
+    ok: true,
+    ended: false,
+    player: game.player,
+    dealer: game.dealer,
+    bet: game.bet,
+    totalBet: game.totalBet,
+    canDouble: false,
+  };
 }
 
 function stand(userId) {
@@ -236,165 +334,37 @@ function doubleDown(userId) {
   const game = games.get(userId);
   if (!game || game.ended) return { ok: false, code: "NO_GAME" };
   if (game.player.length !== 2) return { ok: false, code: "CANNOT_DOUBLE" };
+
   let result;
   store.update((data) => {
-    const u = ensureUserIn(data, userId);
+    const u = store.ensureUserIn(data, userId).user;
     if (u.balance < game.bet) {
       result = { ok: false, code: "INSUFFICIENT_FUNDS", balance: u.balance };
       return;
     }
+
     u.balance -= game.bet;
     u.totalWagered += game.bet;
     game.totalBet = game.bet * 2;
     game.doubled = true;
-    const card = game.deck.pop();
-    game.player.push(card);
-    result = settle(game);
+    game.player.push(drawCard(game));
+    result = resolveSettlement(game, u);
   });
   return result;
 }
 
+// Public settlement entry point. Accepts the game object for compatibility
+// with callers that already hold it (timeouts, tests). The optional "BUST"
+// force preserves the original API for callers that decide the hand is lost.
 function settle(game, force) {
-  const cfg = config.blackjack || {};
+  if (!game || game.ended) return { ok: false, code: "NO_GAME" };
+
   let result;
   store.update((data) => {
-    const u = ensureUserIn(data, game.userId);
-    if (force === "BUST") {
-      game.ended = true;
-      u.totalLost += game.totalBet;
-      u.lastBlackjackAt = now();
-      games.delete(game.userId);
-      if (game.timeoutId) { clearTimeout(game.timeoutId); game.timeoutId = null; }
-      result = {
-        ok: true,
-        ended: true,
-        result: "LOSE",
-        player: game.player,
-        dealer: game.dealer,
-        bet: game.bet,
-        totalBet: game.totalBet,
-        profit: -game.totalBet,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("blackjack_loss", { userId: game.userId, bet: game.totalBet });
-      return;
-    }
-
-    const dealerHitsSoft17 = cfg.dealerHitsSoft17 != null ? cfg.dealerHitsSoft17 : false;
-    while (true) {
-      const dv = handValue(game.dealer);
-      if (dv < 17) { game.dealer.push(game.deck.pop()); continue; }
-      if (dv === 17 && dealerHitsSoft17) {
-        let total = 0;
-        let aces = 0;
-        for (let i = 0; i < game.dealer.length; i++) {
-          const c = game.dealer[i];
-          if (c.rank === "A") aces++;
-          if (c.rank === "A") total += 11;
-          else if (c.rank === "J" || c.rank === "Q" || c.rank === "K") total += 10;
-          else total += parseInt(c.rank, 10);
-        }
-        while (total > 21 && aces > 0) { total -= 10; aces--; }
-        if (aces > 0 && total === 17) { game.dealer.push(game.deck.pop()); continue; }
-        break;
-      }
-      break;
-    }
-
-    const pv = handValue(game.player);
-    const dv2 = handValue(game.dealer);
-    game.ended = true;
-    if (game.timeoutId) { clearTimeout(game.timeoutId); game.timeoutId = null; }
-
-    if (dv2 > 21) {
-      const profit = game.totalBet;
-      u.balance += game.totalBet * 2;
-      u.totalWon += profit;
-      u.lastBlackjackAt = now();
-      games.delete(game.userId);
-      result = {
-        ok: true,
-        ended: true,
-        result: "WIN",
-        player: game.player,
-        dealer: game.dealer,
-        bet: game.bet,
-        totalBet: game.totalBet,
-        profit,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("blackjack_win", { userId: game.userId, bet: game.totalBet, profit });
-      return;
-    }
-    if (pv > dv2) {
-      const profit = game.totalBet;
-      u.balance += game.totalBet * 2;
-      u.totalWon += profit;
-      u.lastBlackjackAt = now();
-      games.delete(game.userId);
-      result = {
-        ok: true,
-        ended: true,
-        result: "WIN",
-        player: game.player,
-        dealer: game.dealer,
-        bet: game.bet,
-        totalBet: game.totalBet,
-        profit,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("blackjack_win", { userId: game.userId, bet: game.totalBet, profit });
-      return;
-    }
-    if (pv < dv2) {
-      u.totalLost += game.totalBet;
-      u.lastBlackjackAt = now();
-      games.delete(game.userId);
-      result = {
-        ok: true,
-        ended: true,
-        result: "LOSE",
-        player: game.player,
-        dealer: game.dealer,
-        bet: game.bet,
-        totalBet: game.totalBet,
-        profit: -game.totalBet,
-        balance: u.balance,
-        totalWagered: u.totalWagered,
-        totalWon: u.totalWon,
-        totalLost: u.totalLost,
-      };
-      logger.info("blackjack_loss", { userId: game.userId, bet: game.totalBet });
-      return;
-    }
-    u.balance += game.totalBet;
-    u.lastBlackjackAt = now();
-    games.delete(game.userId);
-    result = {
-      ok: true,
-      ended: true,
-      result: "PUSH",
-      player: game.player,
-      dealer: game.dealer,
-      bet: game.bet,
-      totalBet: game.totalBet,
-      profit: 0,
-      balance: u.balance,
-      totalWagered: u.totalWagered,
-      totalWon: u.totalWon,
-      totalLost: u.totalLost,
-    };
-    logger.info("blackjack_push", { userId: game.userId, bet: game.totalBet });
-    return;
+    const u = store.ensureUserIn(data, game.userId).user;
+    result = force === "BUST"
+      ? finishGame(game, u, "LOSE", 0)
+      : resolveSettlement(game, u);
   });
   return result;
 }
@@ -403,10 +373,52 @@ function getGame(userId) {
   return games.get(userId);
 }
 
+function setTimeoutHandler(userId, handler) {
+  const game = games.get(userId);
+  if (!game || game.ended) return false;
+  game.onTimeout = typeof handler === "function" ? handler : null;
+  armTimeout(game);
+  return true;
+}
+
 function forceStandTimeout(userId) {
   const game = games.get(userId);
   if (!game || game.ended) return null;
   return settle(game);
 }
 
-module.exports = { play: start, start, hit, stand, double: doubleDown, doubleDown, settle, getGame, forceStandTimeout, createDeck, handValue, isNaturalBlackjack, games };
+function shutdown(options) {
+  const refund = Boolean(options && options.refund);
+  for (const game of games.values()) {
+    clearGameTimer(game);
+    if (refund && game.totalBet > 0) {
+      // Graceful shutdown should not silently confiscate an active stake.
+      store.update((data) => {
+        const u = store.ensureUserIn(data, game.userId).user;
+        if (!Number.isSafeInteger(u.balance + game.totalBet)) return;
+        u.balance += game.totalBet;
+        u.totalWagered = Math.max(0, u.totalWagered - game.totalBet);
+      });
+    }
+  }
+  games.clear();
+}
+
+module.exports = {
+  play: start,
+  start,
+  hit,
+  stand,
+  double: doubleDown,
+  doubleDown,
+  settle,
+  getGame,
+  setTimeoutHandler,
+  forceStandTimeout,
+  shutdown,
+  createDeck,
+  handValue,
+  isSoft17,
+  isNaturalBlackjack,
+  games,
+};

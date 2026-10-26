@@ -1,6 +1,20 @@
+const { AuditLogEvent, PermissionFlagsBits } = require("discord.js");
 const config = require("../../config");
+const logger = require("../utils/logger");
 
-const APPEAL_LINK = "https://forms.gle/BVP2c7HL7nJn7pML7";
+function appealSuffix() {
+  const url = config.appeal?.url;
+  return url ? ` If you believe this was a mistake, you can submit an appeal here: ${url}` : "";
+}
+
+async function sendDirectMessage(user, content) {
+  if (!user || typeof user.send !== "function") return;
+  try {
+    await user.send({ content });
+  } catch (_) {
+    // DMs are commonly disabled.
+  }
+}
 
 module.exports = {
   name: "guildMemberRemove",
@@ -9,36 +23,72 @@ module.exports = {
       if (!member || !member.guild) return;
       if (member.guild.id !== config.discord.guildId) return;
 
-      // Check if the member was banned. We can't tell from this event alone in some cases,
-      // but we can try to fetch ban info.
-      try {
-        const ban = await member.guild.bans.fetch(member.id).catch(() => null);
-        if (ban) {
-          // User was banned
-          try {
-            await member.user.send(
-              `You have been banned from ${member.guild.name}. If you believe this was a mistake, you can submit an appeal here: ${APPEAL_LINK}`
-            );
-          } catch (err) {
-            // DMs might be disabled
-          }
-          return;
-        }
-      } catch (err) {
-        // Ignore errors checking bans
+      const guild = member.guild;
+      const me = guild.members?.me;
+      if (!me) return;
+
+      // Without Ban Members we cannot distinguish a ban from a voluntary
+      // leave, so stay silent instead of sending a misleading DM.
+      if (!me.permissions?.has?.(PermissionFlagsBits.BanMembers)) {
+        logger.warn("departure DM skipped: Ban Members permission is missing", {
+          userId: member.id,
+        });
+        return;
       }
 
-      // If not banned, assume kicked (or left voluntarily). The request says "any user that got kicked or banned"
-      // - try to DM for kicks too as a reasonable approach
+      let ban;
       try {
-        await member.user.send(
-          `You have been kicked from ${member.guild.name}. If you believe this was a mistake, you can submit an appeal here: ${APPEAL_LINK}`
-        );
-      } catch (err) {
-        // DMs might be disabled
+        ban = await guild.bans.fetch(member.id);
+      } catch (error) {
+        // 10026 = Unknown Ban, which means the user is not banned.
+        if (error.code === 10026) {
+          ban = null;
+        } else {
+          logger.warn("ban lookup failed; departure DM skipped", {
+            userId: member.id,
+            error,
+          });
+          return;
+        }
       }
+
+      if (ban) {
+        await sendDirectMessage(
+          member.user,
+          `You have been banned from ${guild.name}.${appealSuffix()}`
+        );
+        return;
+      }
+
+      // Not banned. Only claim a kick when the audit log confirms one.
+      if (!me.permissions?.has?.(PermissionFlagsBits.ViewAuditLog)) {
+        return;
+      }
+
+      let logs;
+      try {
+        logs = await guild.fetchAuditLogs({ type: AuditLogEvent.MemberKick, limit: 5 });
+      } catch (error) {
+        logger.warn("audit log lookup failed; departure DM skipped", {
+          userId: member.id,
+          error,
+        });
+        return;
+      }
+
+      const recentKick = logs.entries.find(
+        (entry) =>
+          entry.target?.id === member.id &&
+          Date.now() - entry.createdTimestamp < 15000
+      );
+      if (!recentKick) return;
+
+      await sendDirectMessage(
+        member.user,
+        `You have been kicked from ${guild.name}.${appealSuffix()}`
+      );
     } catch (error) {
-      console.error("guildMemberRemove error:", error);
+      logger.error("guildMemberRemove error", { error });
     }
   },
 };

@@ -2,6 +2,30 @@ const { SlashCommandBuilder, MessageFlags } = require("discord.js");
 const inventory = require("../economy/inventory");
 const { formatAmount } = require("../utils/format");
 
+function itemName(itemId) {
+  const item = inventory.findItem(itemId);
+  return item ? item.name : itemId;
+}
+
+function useErrorMessage(res) {
+  switch (res.code) {
+    case "NOT_OWNED":
+      return "You don't own that item.";
+    case "UNKNOWN_ITEM":
+      return "Unknown item.";
+    case "NOT_USABLE":
+      return "That item has no use effect, so it was not consumed.";
+    case "INVALID_EFFECT":
+      return "That item is misconfigured and cannot be used.";
+    default:
+      return "Failed to use item.";
+  }
+}
+
+function successMessage(res) {
+  return `You used ${itemName(res.itemId)} and received ${formatAmount(res.amount)}.`;
+}
+
 module.exports = {
   name: "use",
   aliases: [],
@@ -11,23 +35,31 @@ module.exports = {
     const id = interaction.options.getString("id");
     const res = inventory.useItem(interaction.user.id, id);
     if (!res.ok) {
-      if (res.code === "NOT_OWNED") return interaction.reply({ content: "You don't own that item.", flags: MessageFlags.Ephemeral });
-      if (res.code === "UNKNOWN_ITEM") return interaction.reply({ content: "Unknown item.", flags: MessageFlags.Ephemeral });
-      return interaction.reply({ content: "Failed to use item.", flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: useErrorMessage(res), flags: MessageFlags.Ephemeral });
     }
-    const item = inventory.findItem(id);
-    return interaction.reply({ content: `You used ${item ? item.name : id}.` });
+    return interaction.reply({
+      content: successMessage(res),
+      allowedMentions: { parse: [] },
+    });
   },
   async executePrefix(message, args) {
     const id = args[0];
-    if (!id) return message.reply({ content: "Usage: .use <item id>", allowedMentions: { repliedUser: false } });
+    if (!id) {
+      return message.reply({
+        content: "Usage: .use <item id>",
+        allowedMentions: { parse: [], repliedUser: false },
+      });
+    }
     const res = inventory.useItem(message.author.id, id);
     if (!res.ok) {
-      if (res.code === "NOT_OWNED") return message.reply({ content: "You don't own that item.", allowedMentions: { repliedUser: false } });
-      if (res.code === "UNKNOWN_ITEM") return message.reply({ content: "Unknown item.", allowedMentions: { repliedUser: false } });
-      return message.reply({ content: "Failed to use item.", allowedMentions: { repliedUser: false } });
+      return message.reply({
+        content: useErrorMessage(res),
+        allowedMentions: { parse: [], repliedUser: false },
+      });
     }
-    const item = inventory.findItem(id);
-    return message.reply({ content: `You used ${item ? item.name : id}.`, allowedMentions: { parse: [] } });
+    return message.reply({
+      content: successMessage(res),
+      allowedMentions: { parse: [], repliedUser: false },
+    });
   },
 };
