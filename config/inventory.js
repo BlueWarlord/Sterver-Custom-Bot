@@ -19,7 +19,7 @@ module.exports = {
         price: 100000,
         sellPrice: null, // Roles cannot be sold if null.
         type: "role",
-        roleId: "000000000000000000",
+        roleId: "1563638653685604536",
         durationMs: null, // null = permanent role.
       },
       {
@@ -29,7 +29,7 @@ module.exports = {
         price: 500,
         sellPrice: null,
         type: "role",
-        roleId: "000000000000000001",
+        roleId: "1563638719678910594",
         durationMs: 60000, // 60 seconds.
       },
     ],

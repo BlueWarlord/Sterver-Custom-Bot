@@ -1,8 +1,7 @@
 // Core bot identity, Discord wiring, command access, and presentation.
-// Committed defaults only: deployment-specific IDs belong in config.local.js.
 module.exports = {
-  discord: { guildId: "000000000000000000" },
-  channels: { generalChatId: "000000000000000000" },
+  discord: { guildId: "1563216575652433993" },
+  channels: { generalChatId: "1563216576378052620" },
   currency: {
     name: "SterCoin",
     plural: "SterCoins",
@@ -11,7 +10,7 @@ module.exports = {
   },
   commands: {
     prefix: ".",
-    allowedChannelIds: [],
+    allowedChannelIds: ["1563239663995723897"],
 
     // Optional role gates. Leave both empty to allow every member.
     allowedRoleIds: [],
@@ -20,5 +19,5 @@ module.exports = {
     // Lightweight per-user command throttle. Set max to 0 to disable.
     rateLimit: { windowSeconds: 5, max: 10 },
   },
-  appeal: { url: "" },
+  appeal: { url: "https://forms.gle/BVP2c7HL7nJn7pML7" },
 };

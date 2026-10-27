@@ -26,7 +26,7 @@ Copy `.env.example` to `.env` and set:
 - `CLIENT_ID`
 - `LOG_LEVEL` (optional, defaults to `info`)
 
-Copy `config.local.example.js` to `config.local.js` and fill in the guild, channel, drop, and role IDs. It overrides the committed `config/` defaults and is gitignored.
+Fill in the guild, channel, drop, and role IDs directly in the relevant `config/*.js` module. There is a single config layer: `config/index.js` just assembles the sections.
 
 Slash commands are registered automatically on every startup via `guild.commands.set()` in `src/events/ready.js`; `npm run deploy` is only a fallback.
 
@@ -43,15 +43,13 @@ Slash commands are registered automatically on every startup via `guild.commands
 | Path | Responsibility |
 |---|---|
 | `index.js` | Boot, validation, Discord client, event wiring |
-| `config/index.js` | Assembles committed defaults and merges `config.local.js` |
+| `config/index.js` | Assembles the section modules into one object |
 | `config/core.js` | Discord IDs, channels, currency, command access, appeal URL |
 | `config/economy.js` | Starting balance, activity, daily, gifts, leaderboard |
 | `config/drops.js` | Drop scheduling, activity model, reward table |
 | `config/games.js` | Coinflip/blackjack bets, payouts, house edge |
 | `config/inventory.js` | Shop items and roles |
 | `config/storage.js` | Persistence and backup settings |
-| `config/merge.js` | Safe recursive merge for local overrides |
-| `config.local.js` | Gitignored deployment overrides (live IDs, appeal URL) |
 | `deploy-commands.js` | Manual guild slash-command registration |
 | `debug_inv.js` | Manual inventory debugging against a temp store |
 | `src/commands/index.js` | Ordered command registry |
@@ -141,7 +139,7 @@ Current commands:
 
 ## Configuration rules
 
-- Committed defaults live in feature-specific `config/*.js` modules and contain only placeholder/default IDs. Deployment-specific guild/channel/role IDs and the appeal URL belong in the gitignored `config.local.js` (see `config.local.example.js`). Never put secrets in either file.
+- All configuration lives in feature-specific `config/*.js` modules; there is one config layer and no local override file. Guild/channel/role IDs and the appeal URL are set directly in those modules. Never put secrets (tokens, keys) in them — those belong in `.env`.
 - Any new tunable belongs in the relevant `config/*.js` module; add matching validation in its `src/utils/config-validate/*.js` counterpart. Startup aborts on validation errors.
 - `gambling.houseEdge` (0–0.25, default `0.05`) is withheld from every winning gross return. `blackjack.houseEdge` optionally overrides it; `null` inherits the shared value.
 - `config.commands.allowedChannelIds` restricts all commands when non-empty (both slash and prefix). `.pick` is intentionally handled before that check because drops have their own `drops.channelIds` and `drops.pickCooldownSeconds`.
@@ -182,7 +180,7 @@ Current commands:
 - Drop images live in `assets/` and `drops.imagePath` must stay inside it; the runtime also allow-lists image extensions and resolves symlinks before uploading.
 - `drops.imageUrl` and `drops.claimedText` exist in config but are currently unused; `expiredText` is optional and falls back to a hardcoded message.
 - Slash commands are guild-scoped. The bot must be invited with both `bot` and `applications.commands` scopes.
-- `data/`, `.env`, and `config.local.js` are gitignored; `node_modules` is absent on a fresh clone, so run `npm install` before `npm test` or `npm start`.
+- `data/` and `.env` are gitignored; `node_modules` is absent on a fresh clone, so run `npm install` before `npm test` or `npm start`.
 - `debug_inv.js` creates a private `mkdtempSync` directory and removes it on exit.
 - `store.start()` only marks the store as started; the backup timer is started separately in `ready.js`.
 - `inventory.cleanupExpiredRoles()` collects expired entries synchronously from live data, then re-checks live state and mutates through `store.update()` per role. Role purchases and removals are serialized per user.

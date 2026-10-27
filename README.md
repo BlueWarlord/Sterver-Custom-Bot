@@ -8,13 +8,11 @@ Slash commands are registered automatically each time the bot starts.
 
 ## Setup
 1. Copy `.env.example` to `.env` and fill in `DISCORD_TOKEN` and `CLIENT_ID`.
-2. Copy `config.local.example.js` to `config.local.js` and fill in your guild,
-   channel, drop, and role IDs.
+2. Fill in your guild, channel, drop, and role IDs in the `config/` modules.
 3. `npm install`
 4. `npm start`
 
-`config.local.js` is gitignored and overrides the defaults in `config/`. Committed
-defaults are split by feature area:
+Configuration lives in the `config/` folder only, split by feature area:
 
 | File | Contents |
 |---|---|
@@ -24,13 +22,11 @@ defaults are split by feature area:
 | `config/games.js` | Coinflip and blackjack bets, payouts, and house edge |
 | `config/inventory.js` | Shop items and roles |
 | `config/storage.js` | JSON persistence and backup behavior |
-| `config/index.js` | Assembles defaults and merges `config.local.js` |
-
-Live server IDs never need to be added to the public repository.
+| `config/index.js` | Assembles every section into one object |
 
 ## Slash commands not showing up?
 - Re-invite the bot using a link with **both** the `bot` and `applications.commands` scopes.
-- Check `config.discord.guildId` (or your `config.local.js`) is the right server and `CLIENT_ID` in `.env` is the application ID.
+- Check `config.discord.guildId` is the right server and `CLIENT_ID` in `.env` is the application ID.
 - Look for `slash commands registered` in the startup log.
 
 ## Security notes

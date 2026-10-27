@@ -1,7 +1,6 @@
 const assert = require("node:assert");
 const { test } = require("node:test");
 const config = require("./config");
-const { merge } = require("./config/merge");
 
 test("config: split modules assemble every required section", () => {
   for (const section of [
@@ -33,19 +32,4 @@ test("config: gambling exposes a modest, bounded house edge", () => {
     assert.ok(config.blackjack.houseEdge >= 0);
     assert.ok(config.blackjack.houseEdge <= 0.25);
   }
-});
-
-test("config: merge replaces arrays instead of concatenating them", () => {
-  const merged = merge(
-    { a: { b: 1, c: 2 }, list: [1] },
-    { a: { c: 3 }, list: [2] }
-  );
-  assert.deepStrictEqual(merged, { a: { b: 1, c: 3 }, list: [2] });
-});
-
-test("config: merge ignores prototype-polluting keys", () => {
-  const malicious = JSON.parse('{"__proto__":{"polluted":true},"safe":1}');
-  const merged = merge({ safe: 0 }, malicious);
-  assert.strictEqual(merged.safe, 1);
-  assert.strictEqual({}.polluted, undefined);
 });

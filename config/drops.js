@@ -1,12 +1,12 @@
 // Random chat-driven currency drops.
 module.exports = {
   drops: {
-    // Master switch. Enable it in config.local.js.
-    enabled: false,
+    // Master switch.
+    enabled: true,
 
     // Put every channel that can host drops here.
     // These must be channel IDs from your configured Discord server.
-    channelIds: [],
+    channelIds: ["1563216576378052620"],
 
     // Baseline timing model.
     // Each channel independently chooses a baseline interval from this range.
